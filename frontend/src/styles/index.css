@@ -1,0 +1,11 @@
+@tailwind base; @tailwind components; @tailwind utilities;
+html, body, #root { height: 100%; }
+body { @apply bg-canvas text-ink font-sans antialiased; }
+*:focus-visible { outline: 2px solid #D9A51F; outline-offset: 2px; }
+::selection { background: #8E6C18; color: #F2F0EA; }
+input, textarea, button { font: inherit; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+.btn { @apply inline-flex items-center justify-center gap-2 rounded-md px-4 min-h-[44px] font-medium disabled:opacity-50 disabled:cursor-not-allowed; }
+.btn-primary { @apply bg-amber text-canvas hover:bg-[#E5B432]; }
+.btn-ghost { @apply bg-elevated text-ink hover:bg-line; }
+.field { @apply w-full rounded-md bg-elevated border border-line px-3 min-h-[44px] text-ink placeholder:text-muted; }
