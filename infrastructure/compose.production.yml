@@ -1,0 +1,93 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--protected-mode", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [private]
+
+  backend-1:
+    build:
+      context: ../backend
+    environment:
+      ENVIRONMENT: production
+      SERVER_ID: node-1
+      HOST: 0.0.0.0
+      PORT: 8001
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:?Set the public HTTPS origin}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set a unique secret of at least 32 characters}
+      DATABASE_PATH: /data/vakochat.db
+      ADMIN_USERNAMES: ${ADMIN_USERNAMES:?Set at least one initial admin username}
+      NODE_IDS: node-1,node-2
+    volumes:
+      - app_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+    networks: [private]
+
+  backend-2:
+    build:
+      context: ../backend
+    environment:
+      ENVIRONMENT: production
+      SERVER_ID: node-2
+      HOST: 0.0.0.0
+      PORT: 8002
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:?Set the public HTTPS origin}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set a unique secret of at least 32 characters}
+      DATABASE_PATH: /data/vakochat.db
+      ADMIN_USERNAMES: ${ADMIN_USERNAMES:?Set at least one initial admin username}
+      NODE_IDS: node-1,node-2
+    volumes:
+      - app_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8002/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+    networks: [private]
+
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        VITE_APP_NAME: Vakochat
+        VITE_WS_NODE_URLS: ${VITE_WS_NODE_URLS:?Set the public secure WebSocket URL, e.g. wss://chat.example.com/ws}
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      backend-1:
+        condition: service_healthy
+      backend-2:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [private]
+
+networks:
+  private:
+    driver: bridge
+
+volumes:
+  redis_data:
+  app_data:

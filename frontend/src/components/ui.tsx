@@ -1,23 +1,50 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { MessageSquareText } from "lucide-react";
 import type { ConnState } from "../types";
+import { APP_NAME } from "../config/brand";
+import { API_BASES } from "../config/env";
 
 export const initials = (n: string) => n.split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
-export function Avatar({ name, size = 40 }: { name: string; size?: number }) {
+export function Avatar({ name, size = 40, imageUrl }: { name: string; size?: number; imageUrl?: string | null }) {
+  const [baseIndex, setBaseIndex] = useState(0);
+  useEffect(() => setBaseIndex(0), [imageUrl]);
+  const src = imageUrl && baseIndex < API_BASES.length
+    ? `${API_BASES[baseIndex]}${imageUrl}`
+    : undefined;
   return (
-    <div aria-hidden className="shrink-0 rounded-full bg-elevated border border-line text-amber font-semibold grid place-items-center"
-      style={{ width: size, height: size, fontSize: size * 0.38 }}>{initials(name) || "?"}</div>
+    <div aria-hidden="true" className="shrink-0 overflow-hidden rounded-full bg-elevated border border-line text-amber font-semibold grid place-items-center"
+      style={{ width: size, height: size, fontSize: size * 0.38 }}>
+      {src ? <img src={src} alt="" className="h-full w-full object-cover"
+        onError={() => setBaseIndex((index) => Math.min(index + 1, API_BASES.length))} /> : initials(name) || "?"}
+    </div>
+  );
+}
+
+export function BrandWordmark({ className = "" }: { className?: string }) {
+  const isVakochat = APP_NAME.toLocaleLowerCase() === "vakochat";
+  return (
+    <span role="img" aria-label={APP_NAME}
+      className={`inline-flex items-center whitespace-nowrap font-['Orbitron',sans-serif] font-bold tracking-[-0.06em] ${className}`}>
+      {isVakochat ? <>
+        <span>Vakoch</span>
+        <span aria-hidden="true" className="mx-[0.04em] inline-grid h-[0.9em] w-[0.9em] shrink-0 place-items-center rounded-[0.24em] bg-amber text-canvas">
+          <MessageSquareText className="h-[0.62em] w-[0.62em]" strokeWidth={2.5} />
+        </span>
+        <span>t</span>
+      </> : APP_NAME}
+    </span>
   );
 }
 
 const connStyle: Record<ConnState, { c: string; t: string }> = {
   connected: { c: "bg-ok", t: "Connected" }, reconnecting: { c: "bg-warn", t: "Reconnecting" }, disconnected: { c: "bg-bad", t: "Disconnected" },
 };
-export function ConnectionBadge({ state, node }: { state: ConnState; node: string | null }) {
+export function ConnectionBadge({ state }: { state: ConnState }) {
   const s = connStyle[state];
   return (
     <span role="status" className="inline-flex items-center gap-2 text-xs text-dim border border-line rounded-full px-3 py-1">
-      <span className={`h-2 w-2 rounded-full ${s.c}`} />{s.t}{node ? ` · ${node}` : ""}
+      <span className={`h-2 w-2 rounded-full ${s.c}`} />{s.t}
     </span>
   );
 }

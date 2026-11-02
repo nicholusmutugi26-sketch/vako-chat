@@ -1,6 +1,7 @@
 import time, jwt, bcrypt
 from fastapi import Header, HTTPException
 from .config import settings
+from . import db
 
 
 def hash_pw(p: str) -> str:
@@ -31,6 +32,8 @@ def current_user_id(authorization: str = Header(default="")) -> str:
     uid = decode_token(authorization.removeprefix("Bearer ").strip())
     if not uid:
         raise HTTPException(401, "Invalid or expired token")
+    if db.is_suspended(uid):
+        raise HTTPException(403, "This account is suspended")
     return uid
 
 
