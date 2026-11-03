@@ -22,6 +22,58 @@ pictures, contact matching, and an administrator dashboard.
   restoration, recent activity, message traffic, Redis health, node health, and
   app-level node enable/disable controls.
 
+## User guide
+
+### Sign in or create an account
+
+Open the application URL. Enter your username, email address, or phone number
+and password to sign in. To register, choose **Register** and enter a username,
+display name, and password; email and phone are optional. Phone numbers use the
+Kenyan `+254` format. Administrator accounts must be provisioned by an
+operator, not created through public registration.
+
+### Find and start conversations
+
+- **Messages** shows direct conversations and recent activity. Use the
+  conversation search box to find chats; the newest activity is shown first.
+- **Contacts** lets you search for Vakochat users and, on supported browsers,
+  optionally match contacts you explicitly select using the browser Contacts
+  Picker. Contact data is not uploaded until you choose the contacts feature.
+- Start a direct conversation by selecting a contact. Use the new-conversation
+  action to create a group, choose members, and optionally set its name,
+  description, and picture.
+- **Groups** filters the conversation list to group chats. Open a group to view
+  its messages and available group details/editing controls.
+
+### Send and manage messages
+
+Choose a conversation, type in the composer, and send. The composer includes an
+emoji picker. Typing indicators and presence are shown when available. Message
+options include reply, copy, forward, information, and delete; your own message
+can be edited for five minutes after sending. Delivery ticks indicate message
+delivery, and the colored double tick indicates a read receipt. Group receipts
+reflect delivery/read state for the conversation and can include node details.
+
+Unread counts persist across page refreshes because read state is saved by the
+backend. Offline messages are not queued for later delivery; reconnect and
+check the conversation history if connectivity is interrupted.
+
+### Profile and appearance
+
+Open **Profile** to edit your display name, bio, email, phone number, and
+profile picture. Open **Settings** to choose a font, font size, color theme,
+conversation density, unread-count visibility, and reduced-motion preference.
+Save settings when prompted to apply the selected options.
+
+### Admin dashboard
+
+Sign in as an administrator and select **Admin** from the desktop sidebar or
+mobile navigation. The dashboard includes platform counts, node and Redis
+health, message traffic, searchable user management, account suspension, role
+controls, and a recent activity list. Node toggles drain application traffic;
+they do not start or stop server processes. See [Create an administrator](#create-an-administrator)
+for provisioning details.
+
 ## Requirements
 
 - Node.js 22 LTS and npm (Node 22 is used in the production frontend image).
@@ -237,3 +289,30 @@ environment before onboarding real users.
   tokens are held in `sessionStorage`.
 - Both backend nodes must use the same `APP_SECRET_KEY`, `DATABASE_PATH`, Redis
   service, and `NODE_IDS` configuration.
+- See [REPORT.md](REPORT.md) for the architecture overview, implementation
+  challenges and solutions, performance evaluation, and improvement plan.
+
+### Code map and documentation
+
+- `frontend/src/App.tsx`: authenticated application shell and navigation.
+- `frontend/src/pages/`: login, messages, contacts, profile, settings, and admin
+  screens.
+- `frontend/src/context/AppContext.tsx`: shared client state and chat actions.
+- `frontend/src/services/api.ts`: typed REST requests and backend failover.
+- `frontend/src/services/socket.ts`: WebSocket authentication, reconnects,
+  heartbeats, and node failover.
+- `backend/app/main.py`: HTTP and WebSocket routes, authorization, and request
+  handling.
+- `backend/app/hub.py`: local socket registry, Redis relay, presence, node
+  health, and traffic counters.
+- `backend/app/db.py`: SQLite schema, migrations, and parameterized repository
+  operations.
+- `backend/app/auth.py` and `backend/app/config.py`: token/password handling
+  and validated environment configuration.
+- `backend/app/provision_admin.py`: interactive, password-hiding admin
+  provisioning command.
+
+Core modules use module/function docstrings for important boundaries and
+protocols; comments are reserved for implementation details that are not
+obvious from names and types. When changing a WebSocket frame, database schema,
+or environment variable, update its related types, tests, and this guide.
