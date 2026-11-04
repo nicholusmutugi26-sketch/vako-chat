@@ -27,6 +27,7 @@ class Hub:
         self.started = time.time()
         self.sockets: dict[str, set[WebSocket]] = defaultdict(set)  # user_id -> sockets (local only)
         self.redis: aioredis.Redis | None = None
+        self.redis_subscriber: aioredis.Redis | None = None
         self.redis_ok = False
         self.enabled = True
         self.last_check = None
@@ -38,6 +39,10 @@ class Hub:
     async def start(self):
         self.redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True,
                                        socket_connect_timeout=2, socket_timeout=5)
+        # A blocking Pub/Sub read must not inherit the command client's read timeout.
+        self.redis_subscriber = aioredis.from_url(
+            settings.REDIS_URL, decode_responses=True, socket_connect_timeout=2,
+        )
         try:
             control = await self.redis.get(f"vakochat:node-control:{self.node}")
             self.enabled = control != "disabled"
@@ -61,6 +66,8 @@ class Hub:
             except Exception:
                 pass
             await self.redis.aclose()
+        if self.redis_subscriber:
+            await self.redis_subscriber.aclose()
 
     # ---- local registry
     @property
@@ -232,8 +239,9 @@ class Hub:
     async def _subscriber(self):
         backoff = 1
         while True:
+            ps = None
             try:
-                ps = self.redis.pubsub()
+                ps = self.redis_subscriber.pubsub()
                 await ps.subscribe(CHANNEL)
                 self.redis_ok = True
                 backoff = 1
@@ -279,6 +287,9 @@ class Hub:
                 log.warning("subscriber error (%s); retry in %ss", type(e).__name__, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 15)
+            finally:
+                if ps:
+                    await ps.aclose()
 
     async def _heartbeat(self):
         while True:
