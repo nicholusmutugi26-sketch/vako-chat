@@ -18,7 +18,7 @@ export default function Login() {
   return (
     <main className="login-page relative grid min-h-full place-items-center overflow-y-auto p-4">
       <form onSubmit={submit} className="login-card relative z-10 w-full max-w-sm space-y-4 rounded-lg p-6">
-        <h1 className="text-center text-xl"><BrandWordmark /></h1>
+        <h1 className="text-center text-4xl leading-none"><BrandWordmark /></h1>
         <label className="block text-sm">{mode === "login" ? "Username, email, or phone" : "Username"}
           <input className="field mt-1" value={u} onChange={(e) => setU(e.target.value)}
             required minLength={mode === "login" ? 1 : 3}

@@ -25,7 +25,8 @@ The main application interface is organized into several functional sections:
 
 Messages and direct conversations.
 Group conversations and group management.
-Contacts and online users.
+24-hour text and image stories with persisted view state and full-screen viewing.
+Contacts, online users, and user-to-user follow relationships.
 User profiles and application settings.
 Administrative dashboard and network monitoring.
 
@@ -52,6 +53,18 @@ frontend/src/services/socket.ts
 This component is particularly important because it manages persistent connections between clients and backend nodes. Its responsibilities include authentication, heartbeat communication, connection-state monitoring, reconnection backoff and switching to another configured backend node after repeated connection failures.
 
 The browser stores authentication tokens in sessionStorage, meaning they are cleared when the browser tab's session ends. Appearance preferences are persisted in browser storage.
+
+The Stories interface presents recent stories above the conversation search
+field and provides a dedicated navigation page for creating, viewing, and
+deleting them. Story metadata and view receipts are stored in SQLite. Image
+content is served through authenticated endpoints and limited to 2 MB after
+browser-side preparation; stories older than 24 hours are excluded and purged
+when the story list is read or a new story is created.
+
+Following is represented by a directed relationship table in SQLite. Users can
+follow or unfollow accounts from Contacts and inspect follower/following lists
+on their own profile. Story visibility remains available to all registered,
+non-suspended users and is not restricted by following.
 
 For production deployment, the frontend is built into static assets and served through Nginx, which also proxies API and WebSocket traffic to the backend services.
 

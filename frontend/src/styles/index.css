@@ -48,12 +48,42 @@ body { @apply bg-canvas text-ink font-sans antialiased; font-family: Georgia, se
 }
 .login-page::after {
   z-index: 0;
-  background: linear-gradient(135deg, rgb(0 0 0 / 78%), rgb(0 0 0 / 65%));
+  background: rgb(0 0 0 / 72%);
 }
 .login-card {
   background: var(--color-panel);
   border: 2px solid #050505;
   box-shadow: 0 24px 70px rgb(0 0 0 / 75%), 0 0 0 1px rgb(255 255 255 / 12%);
+  animation: login-card-enter 420ms ease-out both;
+}
+@media (max-width: 767px) {
+  .messages-layout.mobile-split { gap: 0; }
+  .messages-layout.mobile-split .mobile-split-list {
+    width: 38%;
+    min-width: 0;
+  }
+  .messages-layout.mobile-split .mobile-split-chat {
+    flex-basis: 62%;
+  }
+  .messages-layout.mobile-split .mobile-split-chat > header {
+    gap: 0.25rem;
+    padding: 0.35rem;
+  }
+  .messages-layout.mobile-split .mobile-split-chat > header > :nth-child(4) {
+    display: none;
+  }
+  .messages-layout.mobile-split .mobile-split-chat .message-composer {
+    gap: 0.25rem;
+    padding: 0.35rem;
+  }
+  .messages-layout.mobile-split .mobile-split-chat .message-composer .btn {
+    min-height: 40px;
+    padding-inline: 0.5rem;
+  }
+}
+@keyframes login-card-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .login-card .field {
   background: var(--color-elevated);
@@ -88,6 +118,15 @@ body { @apply bg-canvas text-ink font-sans antialiased; font-family: Georgia, se
   border-color: var(--color-amber);
   outline: 2px solid var(--color-amber);
   outline-offset: 1px;
+}
+@media (max-width: 767px) {
+  .message-composer-input {
+    min-height: 48px;
+    font-size: 16px;
+    touch-action: manipulation;
+    user-select: text;
+    -webkit-user-select: text;
+  }
 }
 *:focus-visible { outline: 2px solid var(--color-amber); outline-offset: 2px; }
 ::selection { background: var(--color-amber-soft); color: var(--color-ink); }

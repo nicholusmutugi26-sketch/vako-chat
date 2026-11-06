@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Save } from "lucide-react";
+import { Bell, Eye, Palette, Save, ShieldCheck, SlidersHorizontal, Wifi } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { Panel } from "../components/ui";
 import { WS_NODE_URLS } from "../config/env";
@@ -23,6 +23,7 @@ export default function Settings() {
   const [fontFamily, setFontFamily] = useState<FontFamily>(readFontFamily);
   const [showPreviews, setShowPreviews] = useState(() => localStorage.getItem("vk_show_previews") !== "off");
   const [compactList, setCompactList] = useState(() => localStorage.getItem("vk_compact_list") === "on");
+  const [mobileSplit, setMobileSplit] = useState(() => localStorage.getItem("vk_mobile_split") === "on");
   const [reduceMotion, setReduceMotion] = useState(() => localStorage.getItem("vk_reduce_motion") === "on");
   const [saved, setSaved] = useState(() => ({
     notify: localStorage.getItem("vk_notify") !== "off",
@@ -31,6 +32,7 @@ export default function Settings() {
     fontFamily: readFontFamily(),
     showPreviews: localStorage.getItem("vk_show_previews") !== "off",
     compactList: localStorage.getItem("vk_compact_list") === "on",
+    mobileSplit: localStorage.getItem("vk_mobile_split") === "on",
     reduceMotion: localStorage.getItem("vk_reduce_motion") === "on",
   }));
   const [message, setMessage] = useState<string | null>(null);
@@ -48,22 +50,27 @@ export default function Settings() {
     localStorage.setItem("vk_font_family", fontFamily);
     localStorage.setItem("vk_show_previews", showPreviews ? "on" : "off");
     localStorage.setItem("vk_compact_list", compactList ? "on" : "off");
+    localStorage.setItem("vk_mobile_split", mobileSplit ? "on" : "off");
     localStorage.setItem("vk_reduce_motion", reduceMotion ? "on" : "off");
-    setSaved({ notify, theme, fontSize, fontFamily, showPreviews, compactList, reduceMotion });
+    setSaved({ notify, theme, fontSize, fontFamily, showPreviews, compactList, mobileSplit, reduceMotion });
     window.dispatchEvent(new Event("vk-settings-updated"));
     setMessage("Settings saved");
   }
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto px-1 pb-4 sm:px-2">
-      <Panel className="min-h-full w-full overflow-hidden">
-        <header className="border-b border-line bg-elevated/40 px-4 py-4 sm:px-6 sm:py-5">
-          <h2 className="text-lg font-semibold">Settings</h2>
-          <p className="mt-1 text-sm text-dim">Personalize how Vakochat looks and how conversations appear.</p>
+    <div className="mx-auto h-full min-h-0 w-full max-w-6xl overflow-y-auto px-1 pb-4 sm:px-2">
+      <Panel className="min-h-full w-full overflow-hidden rounded-2xl shadow-sm">
+        <header className="flex items-center gap-4 border-b border-line bg-gradient-to-r from-amber/10 via-elevated/40 to-transparent px-4 py-5 sm:px-7 sm:py-7">
+          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-amber/20 bg-amber/10 text-amber"><SlidersHorizontal size={23} /></span>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber">Your workspace</p>
+            <h2 className="mt-1 text-xl font-semibold sm:text-2xl">Settings</h2>
+            <p className="mt-1 text-sm text-dim">Make Vakochat feel like yours, from display to notifications.</p>
+          </div>
         </header>
-        <div className="grid gap-3 p-3 sm:gap-4 sm:p-5 md:grid-cols-2">
-        <section className="rounded-lg border border-line bg-elevated/20 p-4">
-          <h3 className="font-medium">Notifications</h3>
+        <div className="grid gap-4 p-3 sm:gap-5 sm:p-6 md:grid-cols-2">
+        <section className="rounded-2xl border border-line bg-elevated/20 p-4 transition-colors hover:border-amber/25 sm:p-5">
+          <h3 className="flex items-center gap-2 font-medium"><Bell size={17} className="text-amber" />Notifications</h3>
           <p className="mb-2 mt-1 text-xs text-dim">Choose which conversation alerts appear in the app.</p>
           <label className="flex min-h-[44px] items-center gap-3 rounded-md px-2 text-sm hover:bg-elevated">
             <input type="checkbox" className="accent-amber" checked={notify}
@@ -71,8 +78,8 @@ export default function Settings() {
             Show unread message counts
           </label>
         </section>
-        <section className="rounded-lg border border-line bg-elevated/20 p-4">
-          <h3 className="font-medium">Conversation list</h3>
+        <section className="rounded-2xl border border-line bg-elevated/20 p-4 transition-colors hover:border-amber/25 sm:p-5">
+          <h3 className="flex items-center gap-2 font-medium"><Eye size={17} className="text-amber" />Conversation list</h3>
           <p className="mb-2 mt-1 text-xs text-dim">Control message previews and list density.</p>
           <label className="flex min-h-[44px] items-center gap-3 rounded-md px-2 text-sm hover:bg-elevated">
             <input type="checkbox" className="accent-amber" checked={showPreviews}
@@ -84,9 +91,14 @@ export default function Settings() {
               onChange={(e) => { setCompactList(e.target.checked); setMessage(null); }} />
             Use compact conversation list
           </label>
+          <label className="flex min-h-[44px] items-center gap-3 rounded-md px-2 text-sm hover:bg-elevated">
+            <input type="checkbox" className="accent-amber" checked={mobileSplit}
+              onChange={(e) => { setMobileSplit(e.target.checked); setMessage(null); }} />
+            Keep the chat list and conversation side by side on mobile
+          </label>
         </section>
-        <section className="rounded-lg border border-line bg-elevated/20 p-4 md:col-span-2">
-          <h3 className="font-medium">Appearance</h3>
+        <section className="rounded-2xl border border-line bg-elevated/20 p-4 transition-colors hover:border-amber/25 md:col-span-2 sm:p-5">
+          <h3 className="flex items-center gap-2 font-medium"><Palette size={17} className="text-amber" />Appearance</h3>
           <p className="mb-3 mt-1 text-xs text-dim">Adjust the theme, typeface, and text scale across the app.</p>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <label className="block text-sm">Color theme
@@ -120,25 +132,33 @@ export default function Settings() {
               onChange={(e) => { setReduceMotion(e.target.checked); setMessage(null); }} />
             Reduce animations and motion
           </label>
+          <div className="mt-4 rounded-xl border border-line bg-panel p-4">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">Preview</p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p style={{ fontFamily: FONT_FAMILIES[fontFamily], fontSize: `${FONT_SIZE_PX[fontSize]}px` }}
+                className="min-w-0 flex-1 truncate font-medium">A little preview of your chosen type</p>
+              <span className="rounded-full border border-line bg-elevated px-3 py-1 text-xs text-dim">{theme} · {fontSize}</span>
+            </div>
+          </div>
         </section>
-        <section className="rounded-lg border border-line bg-elevated/20 p-4">
-          <h3 className="font-medium">Privacy &amp; security</h3>
+        <section className="rounded-2xl border border-line bg-elevated/20 p-4 transition-colors hover:border-amber/25 sm:p-5">
+          <h3 className="flex items-center gap-2 font-medium"><ShieldCheck size={17} className="text-amber" />Privacy &amp; security</h3>
           <p className="mt-2 text-sm leading-relaxed text-dim">Your session token stays in this browser tab and is cleared when it closes. Passwords are hashed before storage.</p>
         </section>
-        <section className="rounded-lg border border-line bg-elevated/20 p-4">
-          <h3 className="font-medium">Connection</h3>
+        <section className="rounded-2xl border border-line bg-elevated/20 p-4 transition-colors hover:border-amber/25 sm:p-5">
+          <h3 className="flex items-center gap-2 font-medium"><Wifi size={17} className="text-amber" />Connection</h3>
           <p className="mt-2 text-sm text-dim">Configured server nodes</p>
           <p className="mt-1 break-all text-xs leading-relaxed text-muted">{WS_NODE_URLS.join(", ")}</p>
         </section>
         </div>
-        <footer className="sticky bottom-0 flex flex-col-reverse gap-3 border-t border-line bg-panel/95 px-3 py-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between sm:px-5">
-          {message && <p className="text-sm text-dim" role="status">{message}</p>}
+        <footer className="sticky bottom-0 flex flex-col-reverse gap-3 border-t border-line bg-panel/95 px-3 py-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          {message && <p className="text-sm text-ok" role="status">{message}</p>}
           <div className="flex flex-col gap-2 sm:ml-auto sm:flex-row">
           <button className="btn btn-ghost w-full sm:w-auto" onClick={logout}>Sign out</button>
           <button className="btn btn-primary w-full sm:w-auto" onClick={saveSettings}
             disabled={saved.notify === notify && saved.theme === theme && saved.fontSize === fontSize &&
               saved.fontFamily === fontFamily && saved.showPreviews === showPreviews &&
-              saved.compactList === compactList && saved.reduceMotion === reduceMotion}>
+              saved.compactList === compactList && saved.mobileSplit === mobileSplit && saved.reduceMotion === reduceMotion}>
             <Save size={16} />Save settings
           </button>
           </div>

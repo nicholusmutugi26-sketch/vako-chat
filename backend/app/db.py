@@ -8,12 +8,15 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,
   display_name TEXT NOT NULL, bio TEXT DEFAULT '', pw_hash TEXT NOT NULL, created_at REAL,
   avatar_data BLOB, avatar_content_type TEXT, email TEXT UNIQUE, phone TEXT UNIQUE,
-  avatar_version TEXT, is_admin INTEGER NOT NULL DEFAULT 0, is_suspended INTEGER NOT NULL DEFAULT 0);
+  avatar_version TEXT, is_admin INTEGER NOT NULL DEFAULT 0, is_suspended INTEGER NOT NULL DEFAULT 0,
+  is_verified INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, kind TEXT NOT NULL,
   title TEXT, created_by TEXT, created_at REAL, description TEXT DEFAULT '',
   avatar_data BLOB, avatar_content_type TEXT, avatar_version TEXT);
 CREATE TABLE IF NOT EXISTS members(conversation_id TEXT, user_id TEXT,
   PRIMARY KEY(conversation_id,user_id));
+CREATE TABLE IF NOT EXISTS hidden_conversations(conversation_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  hidden_at REAL NOT NULL, PRIMARY KEY(conversation_id,user_id));
 CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
   sender_id TEXT NOT NULL, text TEXT NOT NULL, origin_node TEXT, created_at TEXT NOT NULL, edited_at TEXT);
 CREATE TABLE IF NOT EXISTS message_receipts(message_id TEXT NOT NULL, user_id TEXT NOT NULL,
@@ -21,7 +24,24 @@ CREATE TABLE IF NOT EXISTS message_receipts(message_id TEXT NOT NULL, user_id TE
   PRIMARY KEY(message_id,user_id));
 CREATE TABLE IF NOT EXISTS admin_audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT,
   action TEXT NOT NULL, target_id TEXT, details TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS verification_applications(user_id TEXT PRIMARY KEY, reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, reviewed_at REAL, reviewed_by TEXT);
+CREATE TABLE IF NOT EXISTS stories(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, text TEXT NOT NULL DEFAULT '',
+  image_data BLOB, image_content_type TEXT, audience TEXT NOT NULL DEFAULT 'all', created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS story_views(story_id TEXT NOT NULL, viewer_id TEXT NOT NULL, viewed_at REAL NOT NULL,
+  PRIMARY KEY(story_id,viewer_id));
+CREATE TABLE IF NOT EXISTS story_reactions(story_id TEXT NOT NULL, user_id TEXT NOT NULL, reaction TEXT NOT NULL,
+  created_at REAL NOT NULL, PRIMARY KEY(story_id,user_id));
+CREATE TABLE IF NOT EXISTS user_follows(follower_id TEXT NOT NULL, followed_id TEXT NOT NULL,
+  created_at REAL NOT NULL, PRIMARY KEY(follower_id,followed_id));
+CREATE TABLE IF NOT EXISTS group_admins(conversation_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  PRIMARY KEY(conversation_id,user_id));
+CREATE TABLE IF NOT EXISTS group_invites(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+  inviter_id TEXT NOT NULL, invitee_id TEXT NOT NULL, created_at REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', UNIQUE(conversation_id,invitee_id));
 CREATE INDEX IF NOT EXISTS ix_admin_audit_created ON admin_audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_stories_user_created ON stories(user_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_user_follows_followed ON user_follows(followed_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_msg_conv ON messages(conversation_id, created_at);
 """
 
@@ -61,10 +81,15 @@ def init_db():
             c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         if "is_suspended" not in user_columns:
             c.execute("ALTER TABLE users ADD COLUMN is_suspended INTEGER NOT NULL DEFAULT 0")
+        if "is_verified" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users(email)")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone ON users(phone)")
         c.execute("""UPDATE users SET avatar_version=lower(hex(randomblob(8)))
                      WHERE avatar_data IS NOT NULL AND avatar_version IS NULL""")
+        c.execute("""INSERT OR IGNORE INTO group_admins(conversation_id,user_id)
+                     SELECT id,created_by FROM conversations
+                     WHERE kind='group' AND created_by IS NOT NULL""")
         conversation_columns = {row["name"] for row in c.execute("PRAGMA table_info(conversations)")}
         if "description" not in conversation_columns:
             c.execute("ALTER TABLE conversations ADD COLUMN description TEXT DEFAULT ''")
@@ -79,6 +104,9 @@ def init_db():
         message_columns = {row["name"] for row in c.execute("PRAGMA table_info(messages)")}
         if "edited_at" not in message_columns:
             c.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT")
+        story_columns = {row["name"] for row in c.execute("PRAGMA table_info(stories)")}
+        if "audience" not in story_columns:
+            c.execute("ALTER TABLE stories ADD COLUMN audience TEXT NOT NULL DEFAULT 'all'")
         # seed a public group so a fresh install has something to chat in
         if not c.execute("SELECT 1 FROM conversations WHERE id='general'").fetchone():
             c.execute("""INSERT INTO conversations(id,kind,title,created_by,created_at,description)
@@ -118,10 +146,61 @@ def admin_overview():
 def list_admin_users(query=""):
     pattern = f"%{query}%"
     with conn() as c:
-        rows = c.execute("""SELECT id,username,display_name,email,created_at,is_admin,is_suspended
+        rows = c.execute("""SELECT id,username,display_name,email,created_at,is_admin,is_suspended,is_verified
           FROM users WHERE username LIKE ? COLLATE NOCASE OR display_name LIKE ? COLLATE NOCASE
           ORDER BY created_at DESC LIMIT 200""", (pattern, pattern)).fetchall()
         return [dict(row) for row in rows]
+
+
+def submit_verification_application(uid, reason):
+    with conn() as c:
+        user = c.execute("SELECT is_verified FROM users WHERE id=? AND is_suspended=0", (uid,)).fetchone()
+        if not user:
+            return "user_not_found"
+        if user["is_verified"]:
+            return "verified"
+        existing = c.execute("SELECT status FROM verification_applications WHERE user_id=?", (uid,)).fetchone()
+        if existing and existing["status"] == "pending":
+            return "pending"
+        c.execute("""INSERT INTO verification_applications(user_id,reason,status,created_at,reviewed_at,reviewed_by)
+          VALUES(?,?,'pending',?,NULL,NULL)
+          ON CONFLICT(user_id) DO UPDATE SET reason=excluded.reason,status='pending',
+            created_at=excluded.created_at,reviewed_at=NULL,reviewed_by=NULL""", (uid, reason, time.time()))
+        return "pending"
+
+
+def get_verification_application(uid):
+    with conn() as c:
+        user = c.execute("SELECT is_verified FROM users WHERE id=?", (uid,)).fetchone()
+        row = c.execute("""SELECT user_id,reason,status,created_at,reviewed_at
+          FROM verification_applications WHERE user_id=?""", (uid,)).fetchone()
+        if not user:
+            return None
+        return {"is_verified": bool(user["is_verified"]), "application": dict(row) if row else None}
+
+
+def list_verification_applications(status="pending"):
+    with conn() as c:
+        rows = c.execute("""SELECT a.user_id,a.reason,a.status,a.created_at,a.reviewed_at,u.is_verified,
+          u.username,u.display_name,
+          CASE WHEN u.avatar_content_type IS NOT NULL
+            THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version,'') END avatar_url
+          FROM verification_applications a JOIN users u ON u.id=a.user_id
+          WHERE a.status=? AND u.is_suspended=0 ORDER BY a.created_at ASC LIMIT 200""", (status,)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def review_verification_application(uid, admin_id, approved):
+    status = "approved" if approved else "denied"
+    with conn() as c:
+        application = c.execute("""SELECT 1 FROM verification_applications
+          WHERE user_id=? AND status='pending'""", (uid,)).fetchone()
+        if not application:
+            return False
+        c.execute("""UPDATE verification_applications SET status=?,reviewed_at=?,reviewed_by=?
+          WHERE user_id=? AND status='pending'""", (status, time.time(), admin_id, uid))
+        c.execute("UPDATE users SET is_verified=? WHERE id=?", (int(approved), uid))
+        return True
 
 
 def set_user_admin(uid, enabled):
@@ -164,6 +243,155 @@ def list_audit(limit=100):
         return [dict(row) for row in rows]
 
 
+def create_story(uid, text, image_data=None, image_content_type=None, audience="all"):
+    story_id = new_id()
+    with conn() as c:
+        _purge_expired_stories(c)
+        c.execute("""INSERT INTO stories(id,user_id,text,image_data,image_content_type,audience,created_at)
+                     VALUES(?,?,?,?,?,?,?)""",
+                  (story_id, uid, text, image_data, image_content_type, audience, time.time()))
+    return story_id
+
+
+def _story_visible_to(c, story_id, viewer_id):
+    return c.execute("""SELECT 1 FROM stories s
+      WHERE s.id=? AND (
+        s.user_id=? OR (
+          EXISTS(SELECT 1 FROM user_follows f WHERE f.follower_id=? AND f.followed_id=s.user_id)
+          AND (s.audience IN ('all','followers','both')
+            OR (s.audience='messages' AND EXISTS(
+          SELECT 1 FROM conversations cv
+          JOIN members own ON own.conversation_id=cv.id AND own.user_id=s.user_id
+          JOIN members viewer ON viewer.conversation_id=cv.id AND viewer.user_id=?
+          JOIN messages msg ON msg.conversation_id=cv.id
+          WHERE cv.kind='direct')))
+        )
+      )""", (story_id, viewer_id, viewer_id, viewer_id)).fetchone() is not None
+
+
+def _purge_expired_stories(c):
+    cutoff = time.time() - 24 * 60 * 60
+    c.execute("DELETE FROM story_views WHERE story_id IN (SELECT id FROM stories WHERE created_at<=?)", (cutoff,))
+    c.execute("DELETE FROM stories WHERE created_at<=?", (cutoff,))
+
+
+def list_stories(viewer_id):
+    with conn() as c:
+        _purge_expired_stories(c)
+        cutoff = time.time() - 24 * 60 * 60
+        rows = c.execute("""SELECT s.id,s.user_id,s.text,s.image_content_type,s.created_at,
+          CASE WHEN v.viewer_id IS NULL THEN 0 ELSE 1 END viewed,
+          CASE WHEN s.user_id=? THEN
+            (SELECT COUNT(*) FROM story_views own_views WHERE own_views.story_id=s.id) ELSE 0 END view_count,
+          (SELECT COUNT(*) FROM story_reactions reactions WHERE reactions.story_id=s.id) reaction_count,
+          (SELECT reaction FROM story_reactions own_reaction WHERE own_reaction.story_id=s.id AND own_reaction.user_id=?) my_reaction,
+          u.display_name,u.username,u.avatar_version,u.is_verified,
+          CASE WHEN u.avatar_data IS NOT NULL
+            THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version,'') END avatar_url
+          FROM (SELECT * FROM stories WHERE created_at>? ORDER BY created_at DESC LIMIT 500) s
+          JOIN users u ON u.id=s.user_id
+          LEFT JOIN story_views v ON v.story_id=s.id AND v.viewer_id=?
+          WHERE u.is_suspended=0 AND (
+            s.user_id=? OR (
+              EXISTS(SELECT 1 FROM user_follows f WHERE f.follower_id=? AND f.followed_id=s.user_id)
+              AND (s.audience IN ('all','followers','both')
+                OR (s.audience='messages' AND EXISTS(
+              SELECT 1 FROM conversations cv
+              JOIN members own ON own.conversation_id=cv.id AND own.user_id=s.user_id
+              JOIN members viewer ON viewer.conversation_id=cv.id AND viewer.user_id=?
+              JOIN messages msg ON msg.conversation_id=cv.id
+              WHERE cv.kind='direct')))
+            )
+          )
+          ORDER BY s.created_at ASC""",
+                         (viewer_id, viewer_id, cutoff, viewer_id, viewer_id, viewer_id, viewer_id)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_story_image(story_id, viewer_id):
+    cutoff = time.time() - 24 * 60 * 60
+    with conn() as c:
+        if not _story_visible_to(c, story_id, viewer_id):
+            return None
+        row = c.execute("""SELECT image_data,image_content_type FROM stories
+                           WHERE id=? AND created_at>? AND image_data IS NOT NULL""",
+                        (story_id, cutoff)).fetchone()
+        return (row["image_data"], row["image_content_type"]) if row else None
+
+
+def mark_story_viewed(story_id, viewer_id):
+    cutoff = time.time() - 24 * 60 * 60
+    with conn() as c:
+        story = c.execute("""SELECT user_id FROM stories WHERE id=? AND created_at>?""",
+                           (story_id, cutoff)).fetchone()
+        if not story or story["user_id"] == viewer_id or not _story_visible_to(c, story_id, viewer_id):
+            return False
+        c.execute("""INSERT OR IGNORE INTO story_views(story_id,viewer_id,viewed_at)
+                     VALUES(?,?,?)""", (story_id, viewer_id, time.time()))
+        return True
+
+
+def toggle_story_reaction(story_id, viewer_id, reaction):
+    cutoff = time.time() - 24 * 60 * 60
+    with conn() as c:
+        story = c.execute("SELECT user_id FROM stories WHERE id=? AND created_at>?", (story_id, cutoff)).fetchone()
+        if not story or story["user_id"] == viewer_id or not _story_visible_to(c, story_id, viewer_id):
+            return None
+        existing = c.execute("SELECT reaction FROM story_reactions WHERE story_id=? AND user_id=?",
+                             (story_id, viewer_id)).fetchone()
+        if existing and existing["reaction"] == reaction:
+            c.execute("DELETE FROM story_reactions WHERE story_id=? AND user_id=?", (story_id, viewer_id))
+            selected = None
+        else:
+            c.execute("""INSERT INTO story_reactions(story_id,user_id,reaction,created_at) VALUES(?,?,?,?)
+              ON CONFLICT(story_id,user_id) DO UPDATE SET reaction=excluded.reaction,created_at=excluded.created_at""",
+                      (story_id, viewer_id, reaction, time.time()))
+            selected = reaction
+        count = c.execute("SELECT COUNT(*) FROM story_reactions WHERE story_id=?", (story_id,)).fetchone()[0]
+        return {"reaction": selected, "count": count}
+
+
+def list_story_reactions(story_id, owner_id):
+    cutoff = time.time() - 24 * 60 * 60
+    with conn() as c:
+        story = c.execute("SELECT 1 FROM stories WHERE id=? AND user_id=? AND created_at>?",
+                          (story_id, owner_id, cutoff)).fetchone()
+        if not story:
+            return None
+        rows = c.execute("""SELECT u.id,u.username,u.display_name,u.is_verified,r.reaction,r.created_at,
+          CASE WHEN u.avatar_data IS NOT NULL
+            THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version,'') END avatar_url
+          FROM story_reactions r JOIN users u ON u.id=r.user_id
+          WHERE r.story_id=? AND u.is_suspended=0 ORDER BY r.created_at DESC""", (story_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def story_viewers(story_id, owner_id):
+    cutoff = time.time() - 24 * 60 * 60
+    with conn() as c:
+        story = c.execute(
+            "SELECT 1 FROM stories WHERE id=? AND user_id=? AND created_at>?",
+            (story_id, owner_id, cutoff),
+        ).fetchone()
+        if not story:
+            return None
+        rows = c.execute("""SELECT u.id,u.username,u.display_name,u.is_verified,v.viewed_at,
+          CASE WHEN u.avatar_data IS NOT NULL
+            THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version,'') END avatar_url
+          FROM story_views v JOIN users u ON u.id=v.viewer_id
+          WHERE v.story_id=? AND u.is_suspended=0
+          ORDER BY v.viewed_at DESC""", (story_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def delete_story(story_id, uid):
+    with conn() as c:
+        result = c.execute("DELETE FROM stories WHERE id=? AND user_id=?", (story_id, uid))
+        if result.rowcount:
+            c.execute("DELETE FROM story_views WHERE story_id=?", (story_id,))
+        return result.rowcount > 0
+
+
 def get_user_by_name(username):
     with conn() as c:
         return c.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
@@ -198,16 +426,73 @@ def get_user(uid):
         return c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
 
 
-def search_users(q=""):
+def search_users(q="", viewer_id=None):
     with conn() as c:
-        return c.execute("""SELECT id,username,display_name,
+        return c.execute("""SELECT id,username,display_name,is_verified,
           CASE WHEN avatar_content_type IS NOT NULL
-            THEN '/api/users/' || id || '/avatar?v=' || COALESCE(avatar_version, '') END avatar_url
-          FROM users WHERE username LIKE ? OR display_name LIKE ? LIMIT 50""",
-                         (f"%{q}%", f"%{q}%")).fetchall()
+            THEN '/api/users/' || id || '/avatar?v=' || COALESCE(avatar_version, '') END avatar_url,
+          EXISTS(SELECT 1 FROM user_follows f WHERE f.follower_id=? AND f.followed_id=users.id) is_following,
+          (SELECT COUNT(*) FROM user_follows f WHERE f.followed_id=users.id) follower_count
+          FROM users WHERE is_suspended=0 AND (username LIKE ? OR display_name LIKE ?)
+          ORDER BY display_name COLLATE NOCASE LIMIT 50""",
+                         (viewer_id, f"%{q}%", f"%{q}%")).fetchall()
 
 
-def match_contacts(emails, phones):
+def follow_user(follower_id, followed_id):
+    if follower_id == followed_id:
+        return False
+    with conn() as c:
+        target = c.execute("SELECT 1 FROM users WHERE id=? AND is_suspended=0", (followed_id,)).fetchone()
+        if not target:
+            return False
+        c.execute("INSERT OR IGNORE INTO user_follows(follower_id,followed_id,created_at) VALUES(?,?,?)",
+                  (follower_id, followed_id, time.time()))
+        return True
+
+
+def unfollow_user(follower_id, followed_id):
+    with conn() as c:
+        return c.execute("DELETE FROM user_follows WHERE follower_id=? AND followed_id=?",
+                         (follower_id, followed_id)).rowcount > 0
+
+
+def follow_counts(uid):
+    with conn() as c:
+        return {
+            "followers": c.execute("SELECT COUNT(*) AS count FROM user_follows WHERE followed_id=?", (uid,)).fetchone()["count"],
+            "following": c.execute("SELECT COUNT(*) AS count FROM user_follows WHERE follower_id=?", (uid,)).fetchone()["count"],
+        }
+
+
+def follow_list(uid, relationship, viewer_id=None):
+    if relationship not in ("followers", "following"):
+        raise ValueError("Invalid follow relationship")
+    column = "followed_id" if relationship == "followers" else "follower_id"
+    with conn() as c:
+        rows = c.execute(f"""SELECT u.id,u.username,u.display_name,u.bio,u.is_verified,
+          CASE WHEN u.avatar_content_type IS NOT NULL
+            THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version, '') END avatar_url,
+          EXISTS(SELECT 1 FROM user_follows own WHERE own.follower_id=? AND own.followed_id=u.id) is_following,
+          (SELECT COUNT(*) FROM user_follows f WHERE f.followed_id=u.id) follower_count
+          FROM user_follows f JOIN users u ON u.id=f.{('follower_id' if relationship == 'followers' else 'followed_id')}
+          WHERE f.{column}=? AND u.is_suspended=0
+          ORDER BY f.created_at DESC LIMIT 200""", (viewer_id or uid, uid)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def public_profile(user_id, viewer_id):
+    with conn() as c:
+        row = c.execute("""SELECT u.id,u.username,u.display_name,u.bio,u.is_verified,
+          CASE WHEN u.avatar_content_type IS NOT NULL
+            THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version, '') END avatar_url,
+          EXISTS(SELECT 1 FROM user_follows f WHERE f.follower_id=? AND f.followed_id=u.id) is_following,
+          (SELECT COUNT(*) FROM user_follows f WHERE f.followed_id=u.id) follower_count,
+          (SELECT COUNT(*) FROM user_follows f WHERE f.follower_id=u.id) following_count
+          FROM users u WHERE u.id=? AND u.is_suspended=0""", (viewer_id, user_id)).fetchone()
+        return dict(row) if row else None
+
+
+def match_contacts(emails, phones, viewer_id=None):
     emails = list({email.strip().lower() for email in emails if email.strip()})
     phones = list({phone for value in phones if (phone := normalize_phone(value))})
     clauses, values = [], []
@@ -219,11 +504,14 @@ def match_contacts(emails, phones):
         values.extend(phones)
     if not clauses:
         return []
+    values.insert(0, viewer_id)
     with conn() as c:
-        return c.execute("""SELECT id,username,display_name,
+        return c.execute("""SELECT id,username,display_name,is_verified,
           CASE WHEN avatar_content_type IS NOT NULL
-            THEN '/api/users/' || id || '/avatar?v=' || COALESCE(avatar_version, '') END avatar_url
-          FROM users WHERE """ + " OR ".join(clauses) + " LIMIT 100", values).fetchall()
+            THEN '/api/users/' || id || '/avatar?v=' || COALESCE(avatar_version, '') END avatar_url,
+          EXISTS(SELECT 1 FROM user_follows f WHERE f.follower_id=? AND f.followed_id=users.id) is_following,
+          (SELECT COUNT(*) FROM user_follows f WHERE f.followed_id=users.id) follower_count
+          FROM users WHERE (""" + " OR ".join(clauses) + ") AND is_suspended=0 LIMIT 100", values).fetchall()
 
 
 def update_profile(uid, display_name, bio, email, phone):
@@ -252,11 +540,15 @@ def create_conversation(kind, title, creator, members, description=""):
             row = c.execute("""SELECT c.id FROM conversations c JOIN members a ON a.conversation_id=c.id AND a.user_id=?
               JOIN members b ON b.conversation_id=c.id AND b.user_id=? WHERE c.kind='direct'""", (creator, others[0])).fetchone()
             if row:
+                c.execute("DELETE FROM hidden_conversations WHERE conversation_id=? AND user_id=?",
+                          (row["id"], creator))
                 return row["id"]
         cid = new_id()
         c.execute("""INSERT INTO conversations(id,kind,title,created_by,created_at,description)
                      VALUES(?,?,?,?,?,?)""", (cid, kind, title, creator, time.time(), description))
         c.executemany("INSERT INTO members VALUES(?,?)", [(cid, m) for m in members])
+        if kind == "group":
+            c.execute("INSERT OR IGNORE INTO group_admins(conversation_id,user_id) VALUES(?,?)", (cid, creator))
     return cid
 
 
@@ -269,17 +561,136 @@ def update_conversation(cid, title, description):
         return result.rowcount > 0
 
 
+def is_group_admin(cid, uid):
+    with conn() as c:
+        return c.execute("""SELECT 1 FROM conversations c
+          LEFT JOIN group_admins a ON a.conversation_id=c.id AND a.user_id=?
+          LEFT JOIN users u ON u.id=?
+          WHERE c.id=? AND c.kind='group' AND (c.created_by=? OR a.user_id IS NOT NULL OR u.is_admin=1)""",
+                         (uid, uid, cid, uid)).fetchone() is not None
+
+
+def create_group_invite(cid, inviter_id, invitee_id):
+    invite_id = new_id()
+    with conn() as c:
+        if not c.execute("SELECT 1 FROM conversations WHERE id=? AND kind='group'", (cid,)).fetchone():
+            return None, "group_not_found"
+        if not c.execute("SELECT 1 FROM users WHERE id=? AND is_suspended=0", (invitee_id,)).fetchone():
+            return None, "user_not_found"
+        if c.execute("SELECT 1 FROM members WHERE conversation_id=? AND user_id=?", (cid, invitee_id)).fetchone():
+            return None, "already_member"
+        existing = c.execute("""SELECT id,status FROM group_invites
+                                WHERE conversation_id=? AND invitee_id=?""", (cid, invitee_id)).fetchone()
+        if existing and existing["status"] == "pending":
+            return existing["id"], "pending"
+        if existing:
+            c.execute("UPDATE group_invites SET inviter_id=?,created_at=?,status='pending' WHERE id=?",
+                      (inviter_id, time.time(), existing["id"]))
+            return existing["id"], "pending"
+        c.execute("""INSERT INTO group_invites(id,conversation_id,inviter_id,invitee_id,created_at,status)
+                     VALUES(?,?,?,?,?,'pending')""", (invite_id, cid, inviter_id, invitee_id, time.time()))
+        return invite_id, "pending"
+
+
+def list_group_invites(uid):
+    with conn() as c:
+        rows = c.execute("""SELECT i.id,i.conversation_id,i.created_at,c.title,c.description,
+          CASE WHEN c.avatar_content_type IS NOT NULL
+            THEN '/api/conversations/' || c.id || '/avatar?v=' || COALESCE(c.avatar_version,'') END avatar_url,
+          inviter.display_name inviter_name,inviter.username inviter_username
+          FROM group_invites i JOIN conversations c ON c.id=i.conversation_id
+          JOIN users inviter ON inviter.id=i.inviter_id
+          WHERE i.invitee_id=? AND i.status='pending' AND c.kind='group'
+          ORDER BY i.created_at DESC LIMIT 100""", (uid,)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def respond_group_invite(invite_id, uid, accept):
+    with conn() as c:
+        invite = c.execute("""SELECT conversation_id FROM group_invites
+                              WHERE id=? AND invitee_id=? AND status='pending'""",
+                           (invite_id, uid)).fetchone()
+        if not invite:
+            return None
+        cid = invite["conversation_id"]
+        if accept:
+            c.execute("INSERT OR IGNORE INTO members(conversation_id,user_id) VALUES(?,?)", (cid, uid))
+        c.execute("UPDATE group_invites SET status=? WHERE id=?",
+                  ("accepted" if accept else "declined", invite_id))
+        return cid
+
+
+def update_group_admin(cid, user_id, enabled):
+    with conn() as c:
+        if not c.execute("SELECT 1 FROM members WHERE conversation_id=? AND user_id=?", (cid, user_id)).fetchone():
+            return False
+        if enabled:
+            c.execute("INSERT OR IGNORE INTO group_admins(conversation_id,user_id) VALUES(?,?)", (cid, user_id))
+        else:
+            owner = c.execute("SELECT created_by FROM conversations WHERE id=?", (cid,)).fetchone()
+            if owner and owner["created_by"] == user_id:
+                return False
+            c.execute("DELETE FROM group_admins WHERE conversation_id=? AND user_id=?", (cid, user_id))
+        return True
+
+
+def remove_group_member(cid, user_id):
+    with conn() as c:
+        if not c.execute("SELECT 1 FROM members WHERE conversation_id=? AND user_id=?", (cid, user_id)).fetchone():
+            return False
+        admins = c.execute("SELECT COUNT(*) AS count FROM group_admins WHERE conversation_id=?", (cid,)).fetchone()["count"]
+        is_admin = c.execute("SELECT 1 FROM group_admins WHERE conversation_id=? AND user_id=?", (cid, user_id)).fetchone()
+        if is_admin and admins <= 1:
+            return False
+        c.execute("DELETE FROM members WHERE conversation_id=? AND user_id=?", (cid, user_id))
+        c.execute("DELETE FROM group_admins WHERE conversation_id=? AND user_id=?", (cid, user_id))
+        c.execute("DELETE FROM group_invites WHERE conversation_id=? AND invitee_id=?", (cid, user_id))
+        return True
+
+
+def leave_group(cid, uid):
+    with conn() as c:
+        group = c.execute("SELECT created_by FROM conversations WHERE id=? AND kind='group'", (cid,)).fetchone()
+        if not group or not c.execute("SELECT 1 FROM members WHERE conversation_id=? AND user_id=?", (cid, uid)).fetchone():
+            return False
+        remaining = c.execute("SELECT COUNT(*) AS count FROM members WHERE conversation_id=? AND user_id<>?",
+                              (cid, uid)).fetchone()["count"]
+        if remaining == 0:
+            return False
+        c.execute("DELETE FROM members WHERE conversation_id=? AND user_id=?", (cid, uid))
+        c.execute("DELETE FROM group_admins WHERE conversation_id=? AND user_id=?", (cid, uid))
+        if group["created_by"] == uid:
+            replacement = c.execute("""SELECT m.user_id FROM members m
+              LEFT JOIN group_admins a ON a.conversation_id=m.conversation_id AND a.user_id=m.user_id
+              WHERE m.conversation_id=? ORDER BY CASE WHEN a.user_id IS NOT NULL THEN 0 ELSE 1 END,m.rowid LIMIT 1""",
+                                    (cid,)).fetchone()["user_id"]
+            c.execute("UPDATE conversations SET created_by=? WHERE id=?", (replacement, cid))
+            c.execute("INSERT OR IGNORE INTO group_admins(conversation_id,user_id) VALUES(?,?)", (cid, replacement))
+        c.execute("DELETE FROM group_invites WHERE conversation_id=? AND invitee_id=?", (cid, uid))
+        return True
+
+
 def list_conversations(uid):
     with conn() as c:
         convs = c.execute("""SELECT c.* FROM conversations c JOIN members m ON m.conversation_id=c.id
-                             WHERE m.user_id=?""", (uid,)).fetchall()
+                             WHERE m.user_id=? AND NOT EXISTS(
+                               SELECT 1 FROM hidden_conversations h
+                               WHERE h.conversation_id=c.id AND h.user_id=m.user_id
+                                 AND h.hidden_at >= COALESCE((
+                                   SELECT MAX((julianday(msg.created_at)-2440587.5)*86400.0)
+                                   FROM messages msg WHERE msg.conversation_id=c.id
+                                 ),0)
+                             )""", (uid,)).fetchall()
         out = []
         for cv in convs:
-            mem = c.execute("""SELECT u.id,u.display_name,u.username,
+            mem = c.execute("""SELECT u.id,u.display_name,u.username,u.is_verified,
                                       CASE WHEN u.avatar_content_type IS NOT NULL
-                                        THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version, '') END avatar_url
+                                        THEN '/api/users/' || u.id || '/avatar?v=' || COALESCE(u.avatar_version, '') END avatar_url,
+                                      EXISTS(SELECT 1 FROM group_admins a WHERE a.conversation_id=m.conversation_id AND a.user_id=u.id) is_admin,
+                                      EXISTS(SELECT 1 FROM user_follows f WHERE f.follower_id=? AND f.followed_id=u.id) is_following,
+                                      (SELECT COUNT(*) FROM user_follows f WHERE f.followed_id=u.id) follower_count
                                FROM members m JOIN users u ON u.id=m.user_id
-                               WHERE m.conversation_id=?""", (cv["id"],)).fetchall()
+                               WHERE m.conversation_id=?""", (uid, cv["id"])).fetchall()
             last = c.execute("""SELECT id,text,created_at,sender_id FROM messages
                 WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1""",
                              (cv["id"],)).fetchone()
@@ -303,7 +714,10 @@ def list_conversations(uid):
                         "last_message_id": last["id"] if last else None,
                         "last_message_sender_id": last["sender_id"] if last else None,
                         "last_message_status": last_status,
-                        "unread_count": unread})
+                        "unread_count": unread,
+                        "is_admin": bool(cv["created_by"] == uid or c.execute(
+                            "SELECT 1 FROM group_admins WHERE conversation_id=? AND user_id=?", (cv["id"], uid)
+                        ).fetchone() or c.execute("SELECT is_admin FROM users WHERE id=?", (uid,)).fetchone()["is_admin"])})
         return out
 
 
@@ -402,6 +816,36 @@ def delete_message(mid, uid):
         c.execute("DELETE FROM message_receipts WHERE message_id=?", (mid,))
         c.execute("DELETE FROM messages WHERE id=?", (mid,))
         return row["conversation_id"]
+
+
+def delete_messages(message_ids, uid):
+    if not message_ids or len(message_ids) > 100 or len(set(message_ids)) != len(message_ids):
+        return None
+    placeholders = ",".join("?" for _ in message_ids)
+    with conn() as c:
+        rows = c.execute(
+            f"SELECT id,conversation_id,sender_id FROM messages WHERE id IN ({placeholders})",
+            tuple(message_ids),
+        ).fetchall()
+        if len(rows) != len(message_ids) or any(row["sender_id"] != uid for row in rows):
+            return None
+        c.execute(f"DELETE FROM message_receipts WHERE message_id IN ({placeholders})", tuple(message_ids))
+        c.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", tuple(message_ids))
+        return [{"message_id": row["id"], "conversation_id": row["conversation_id"]} for row in rows]
+
+
+def hide_conversation(cid, uid):
+    with conn() as c:
+        row = c.execute("""SELECT c.kind FROM conversations c JOIN members m ON m.conversation_id=c.id
+                           WHERE c.id=? AND m.user_id=?""", (cid, uid)).fetchone()
+        if not row:
+            return "not_found"
+        if row["kind"] != "direct":
+            return "group"
+        c.execute("""INSERT INTO hidden_conversations(conversation_id,user_id,hidden_at) VALUES(?,?,?)
+                     ON CONFLICT(conversation_id,user_id) DO UPDATE SET hidden_at=excluded.hidden_at""",
+                  (cid, uid, time.time()))
+        return "hidden"
 
 
 def edit_message(mid, uid, text, edited_at, now):

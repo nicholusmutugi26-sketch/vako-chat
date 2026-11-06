@@ -14,14 +14,17 @@ interface Ctx {
   activeId: string | null; conn: ConnState; nodeId: string | null;
   online: Set<string>; presenceAvailable: boolean; notice: string | null;
   authenticate(mode: "login" | "register", u: string, p: string, name?: string, email?: string, phone?: string): Promise<void>;
-  logout(): void; select(id: string | null): void; send(text: string): void; sendTo(id: string, text: string): void;
+  logout(): void; select(id: string | null): void; send(text: string): void; sendTo(id: string, text: string): boolean;
   removeMessage(id: string, conversationId: string): void; editMessage(id: string, conversationId: string, text: string): Promise<void>;
+  removeMessages(ids: string[], conversationId: string): Promise<void>;
+  hideConversation(id: string): Promise<void>;
   setTyping(conversationId: string, isTyping: boolean): void;
-  openDirect(userId: string): Promise<void>;
+  openDirect(userId: string): Promise<string>;
   createGroup(title: string, ids: string[], description: string, avatar?: File): Promise<void>;
   updateGroup(id: string, title: string, description: string, avatar?: File): Promise<void>;
   uploadGroupAvatar(id: string, file: File): Promise<void>;
   deleteGroupAvatar(id: string): Promise<void>;
+  refreshConversations(): Promise<void>;
   setUser(u: User): void;
 }
 const C = createContext<Ctx>(null as unknown as Ctx);
@@ -125,15 +128,63 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!ok) {
       setNotice("Not connected — message was NOT sent");
     }
+    return !!ok;
   }, []);
 
   const removeMessage = useCallback((id: string, conversationId: string) => {
     void api.deleteMessage(id).then((result) => {
       setMessages((p) => ({ ...p, [conversationId]: (p[conversationId] ?? []).filter((m) => m.id !== id) }));
+      seen.current.delete(id);
       setMessageStatus((p) => { const next = { ...p }; delete next[id]; return next; });
       if (result.relay_status === "local_only") setNotice("Deleted locally; other nodes may show the message until they reconnect");
+      void refreshConversationList().catch(() => setNotice("Message deleted, but the conversation preview could not be refreshed"));
     }).catch(() => setNotice("Message could not be deleted"));
-  }, []);
+  }, [refreshConversationList]);
+
+  const removeMessages = useCallback(async (ids: string[], conversationId: string) => {
+    const result = await api.deleteMessages(ids);
+    const deletedIds = new Set(result.deleted.map((item) => item.message_id));
+    result.deleted.forEach((item) => seen.current.delete(item.message_id));
+    setMessages((current) => ({
+      ...current,
+      [conversationId]: (current[conversationId] ?? []).filter((message) => !deletedIds.has(message.id)),
+    }));
+    setMessageStatus((current) => {
+      const next = { ...current };
+      deletedIds.forEach((id) => delete next[id]);
+      return next;
+    });
+    if (result.deleted.some((item) => item.relay_status === "local_only"))
+      setNotice("Deleted locally; other nodes may show some messages until they reconnect");
+    try {
+      await refreshConversationList();
+    } catch {
+      setNotice("Messages deleted, but the conversation preview could not be refreshed");
+    }
+  }, [refreshConversationList]);
+
+  const hideConversation = useCallback(async (id: string) => {
+    await api.deleteConversation(id);
+    const messageIds = (messages[id] ?? []).map((message) => message.id);
+    messageIds.forEach((messageId) => seen.current.delete(messageId));
+    setMessages((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setMessageStatus((current) => {
+      const next = { ...current };
+      messageIds.forEach((messageId) => delete next[messageId]);
+      return next;
+    });
+    setUnread((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setConversations((current) => current.filter((conversation) => conversation.id !== id));
+    if (activeRef.current === id) setActiveId(null);
+  }, [messages]);
 
   const editMessage = useCallback(async (id: string, conversationId: string, text: string) => {
     const updated = await api.editMessage(id, text);
@@ -303,12 +354,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     send(text) {
       if (activeRef.current) sendTo(activeRef.current, text);
     },
-    sendTo, removeMessage, editMessage,
+    sendTo, removeMessage, removeMessages, hideConversation, editMessage,
     setTyping,
     async openDirect(userId) {
       const c = await api.createConversation("direct", [userId]);
       setConversations((p) => (p.some((x) => x.id === c.id) ? p : [...p, c]));
       setActiveId(c.id);
+      await loadHistory(c.id);
+      return c.id;
     },
     async createGroup(title, ids, description, avatar) {
       const preparedAvatar = avatar ? await prepareGroupImage(avatar) : undefined;
@@ -345,7 +398,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const updated = await api.deleteGroupAvatar(id);
       setConversations((current) => current.map((conversation) => conversation.id === id ? updated : conversation));
     },
-  }), [user, booting, conversations, messages, unread, messageStatus, typing, activeId, conn, nodeId, online, presenceAvailable, notice, logout, setTyping, sendTo, removeMessage, editMessage, updateUser]);
+    async refreshConversations() {
+      await refreshConversationList();
+    },
+  }), [user, booting, conversations, messages, unread, messageStatus, typing, activeId, conn, nodeId, online, presenceAvailable, notice, logout, setTyping, sendTo, removeMessage, removeMessages, hideConversation, editMessage, updateUser, refreshConversationList, loadHistory]);
 
   void WS_NODE_URLS;
   return <C.Provider value={value}>{children}</C.Provider>;

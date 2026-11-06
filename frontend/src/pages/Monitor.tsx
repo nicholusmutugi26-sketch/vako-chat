@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, Ban, Database, MessageSquare, Search, Server, Shield, Users } from "lucide-react";
+import { Activity, Ban, Database, MessageSquare, Search, Server, Shield, Users, X } from "lucide-react";
 import { api } from "../services/api";
 import { useApp } from "../context/AppContext";
-import { Panel } from "../components/ui";
-import type { AdminAuditEvent, AdminOverview, AdminUser, ClusterStatus } from "../types";
+import { Avatar, Panel } from "../components/ui";
+import VerifiedBadge from "../components/VerifiedBadge";
+import type { AdminAuditEvent, AdminOverview, AdminUser, ClusterStatus, VerificationApplication } from "../types";
 
 const dur = (s: number | null) => (s === null ? "Unavailable" : s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${(s / 3600).toFixed(1)}h`);
 const Dot = ({ ok, warn }: { ok: boolean; warn?: boolean }) => <span className={`h-2 w-2 rounded-full ${ok ? "bg-ok" : warn ? "bg-warn" : "bg-bad"}`} />;
@@ -24,18 +25,20 @@ export default function Monitor() {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [audit, setAudit] = useState<AdminAuditEvent[]>([]);
+  const [verificationApplications, setVerificationApplications] = useState<VerificationApplication[]>([]);
   const [query, setQuery] = useState("");
   const [adminError, setAdminError] = useState<string | null>(null);
   const [busyUser, setBusyUser] = useState<string | null>(null);
 
   const refreshAdmin = useCallback(async () => {
     try {
-      const [summary, userList, events] = await Promise.all([
-        api.adminOverview(), api.adminUsers(query), api.adminAudit(),
+      const [summary, userList, events, applications] = await Promise.all([
+        api.adminOverview(), api.adminUsers(query), api.adminAudit(), api.verificationApplications(),
       ]);
       setOverview(summary);
       setUsers(userList);
       setAudit(events);
+      setVerificationApplications(applications);
       setAdminError(null);
     } catch (e) {
       setAdminError(e instanceof Error ? e.message : "Admin data could not be loaded");
@@ -91,6 +94,19 @@ export default function Monitor() {
     } finally { setBusyUser(null); }
   }
 
+  async function reviewVerification(application: VerificationApplication, approved: boolean) {
+    setBusyUser(application.user_id);
+    setAdminError(null);
+    try {
+      await api.reviewVerificationApplication(application.user_id, approved);
+      await refreshAdmin();
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : "Verification application could not be reviewed");
+    } finally {
+      setBusyUser(null);
+    }
+  }
+
   return (
     <div className="h-full space-y-4 overflow-y-auto pb-5">
       <Panel className="p-4">
@@ -110,6 +126,36 @@ export default function Monitor() {
         <Metric label="Messages" value={overview?.messages ?? null} Icon={MessageSquare} />
         <Metric label="Suspended accounts" value={overview?.suspended ?? null} Icon={Ban} />
       </section>
+
+      <Panel className="p-4">
+        <div className="mb-3">
+          <h3 className="font-semibold">Verification applications</h3>
+          <p className="text-xs text-dim">Review account verification requests. Approval grants the public verified badge.</p>
+        </div>
+        {verificationApplications.length === 0
+          ? <p className="py-4 text-sm text-muted">No pending verification applications.</p>
+          : <ul className="space-y-3">
+            {verificationApplications.map((application) => <li key={application.user_id}
+              className="flex flex-col gap-3 rounded-xl border border-line bg-elevated/20 p-3 sm:flex-row sm:items-start">
+              <Avatar name={application.display_name} imageUrl={application.avatar_url} size={42} />
+              <div className="min-w-0 flex-1">
+                <p className="font-medium">{application.display_name} <span className="text-xs text-dim">@{application.username}</span></p>
+                <p className="mt-1 whitespace-pre-wrap break-words text-sm text-dim">{application.reason}</p>
+                <p className="mt-1 text-[11px] text-muted">Submitted {new Date(application.created_at * 1000).toLocaleString()}</p>
+              </div>
+              <div className="flex shrink-0 gap-2 sm:flex-col">
+                <button type="button" className="btn btn-primary min-h-10 flex-1 justify-center sm:flex-none"
+                  disabled={busyUser === application.user_id}
+                  onClick={() => void reviewVerification(application, true)}>
+                  <VerifiedBadge />{busyUser === application.user_id ? "Saving…" : "Approve"}
+                </button>
+                <button type="button" className="btn btn-ghost min-h-10 flex-1 justify-center text-bad sm:flex-none"
+                  disabled={busyUser === application.user_id}
+                  onClick={() => void reviewVerification(application, false)}><X size={15} />Deny</button>
+              </div>
+            </li>)}
+          </ul>}
+      </Panel>
 
       <section aria-label="Cluster health">
         <h3 className="mb-2 font-semibold">Cluster health</h3>
@@ -169,7 +215,7 @@ export default function Monitor() {
               <tbody>
                 {users.map((item) => (
                   <tr key={item.id} className="border-b border-line last:border-0">
-                    <td className="px-2 py-3"><p className="font-medium">{item.display_name}</p><p className="text-xs text-dim">@{item.username}{item.email ? ` · ${item.email}` : ""}</p></td>
+                    <td className="px-2 py-3"><p className="flex items-center gap-1 font-medium">{item.display_name}{item.is_verified && <VerifiedBadge />}</p><p className="text-xs text-dim">@{item.username}{item.email ? ` · ${item.email}` : ""}</p></td>
                     <td className="px-2 py-3">{item.is_suspended ? <span className="text-bad">Suspended</span> : <span className="text-ok">Active</span>}</td>
                     <td className="px-2 py-3">{item.is_admin ? "Admin" : "User"}{item.managed_by_config ? " · config" : ""}</td>
                     <td className="px-2 py-3 text-xs text-dim">{new Date(item.created_at * 1000).toLocaleDateString()}</td>

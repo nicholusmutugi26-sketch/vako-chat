@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, UserCheck, UserPlus } from "lucide-react";
 import { api } from "../services/api";
 import { useApp } from "../context/AppContext";
 import { Avatar, EmptyState, Panel, Presence } from "../components/ui";
+import VerifiedBadge from "../components/VerifiedBadge";
 import type { Member } from "../types";
 
 type DeviceContact = { email?: string[]; tel?: string[] };
@@ -18,6 +19,8 @@ export default function Contacts({ onOpen }: { onOpen: () => void }) {
   const [deviceMatches, setDeviceMatches] = useState<Member[]>([]);
   const [contactMessage, setContactMessage] = useState<string | null>(null);
   const [contactsBusy, setContactsBusy] = useState(false);
+  const [followBusyId, setFollowBusyId] = useState<string | null>(null);
+  const [followError, setFollowError] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     const loadUsers = () => {
@@ -67,6 +70,23 @@ export default function Contacts({ onOpen }: { onOpen: () => void }) {
     onOpen();
   }
 
+  async function toggleFollow(member: Member) {
+    setFollowBusyId(member.id);
+    setFollowError(null);
+    try {
+      const result = member.is_following ? await api.unfollowUser(member.id) : await api.followUser(member.id);
+      const update = (items: Member[]) => items.map((item) => item.id === member.id
+        ? { ...item, is_following: result.is_following, follower_count: result.followers }
+        : item);
+      setUsers((current) => current ? update(current) : current);
+      setDeviceMatches(update);
+    } catch (reason) {
+      setFollowError(reason instanceof Error ? reason.message : "Follow status could not be updated");
+    } finally {
+      setFollowBusyId(null);
+    }
+  }
+
   const deviceMatchIds = new Set(deviceMatches.map((user) => user.id));
   const visibleUsers = users?.filter((user) => !deviceMatchIds.has(user.id));
 
@@ -79,6 +99,7 @@ export default function Contacts({ onOpen }: { onOpen: () => void }) {
         </button>
         <p className="mt-2 text-xs text-dim">Your browser will ask you to select which phone contacts to check. Contact details are used only to find matching accounts.</p>
         {contactMessage && <p className="mt-2 text-sm text-dim" role="status">{contactMessage}</p>}
+        {followError && <p className="mt-2 text-sm text-bad" role="alert">{followError}</p>}
       </div>
       {!a.presenceAvailable && <p className="px-3 pb-2 text-xs text-warn">Presence unavailable (Redis not reachable)</p>}
       <ul className="flex-1 overflow-y-auto">
@@ -87,18 +108,28 @@ export default function Contacts({ onOpen }: { onOpen: () => void }) {
         {deviceMatches.map((u) => (
           <li key={`phone-${u.id}`} className="flex items-center gap-3 p-3 hover:bg-elevated">
             <Avatar name={u.display_name} imageUrl={u.avatar_url} />
-            <div className="flex-1 min-w-0"><p className="truncate">{u.display_name} <span className="text-muted text-sm">@{u.username}</span></p>
+            <div className="flex-1 min-w-0"><p className="flex items-center gap-1 truncate">{u.display_name}{u.is_verified && <VerifiedBadge className="h-4 w-4" />} <span className="text-muted text-sm">@{u.username}</span></p>
               <Presence online={a.online.has(u.id)} available={a.presenceAvailable} /></div>
             <button className="btn btn-ghost" onClick={() => void messageUser(u)}><MessageSquare size={16} />Message</button>
+            <button className={`btn ${u.is_following ? "btn-ghost" : "btn-primary"}`} disabled={followBusyId === u.id}
+              onClick={() => void toggleFollow(u)} aria-label={`${u.is_following ? "Unfollow" : "Follow"} ${u.display_name}`}>
+              {u.is_following ? <UserCheck size={16} /> : <UserPlus size={16} />}
+              <span className="hidden sm:inline">{followBusyId === u.id ? "Saving…" : u.is_following ? "Following" : "Follow"}</span>
+            </button>
           </li>
         ))}
         {visibleUsers?.length ? <li className="px-3 pt-2 pb-1 text-xs font-medium uppercase tracking-wide text-dim">Vakochat users</li> : null}
         {visibleUsers?.map((u) => (
           <li key={u.id} className="flex items-center gap-3 p-3 hover:bg-elevated">
             <Avatar name={u.display_name} imageUrl={u.avatar_url} />
-            <div className="flex-1 min-w-0"><p className="truncate">{u.display_name} <span className="text-muted text-sm">@{u.username}</span></p>
+            <div className="flex-1 min-w-0"><p className="flex items-center gap-1 truncate">{u.display_name}{u.is_verified && <VerifiedBadge className="h-4 w-4" />} <span className="text-muted text-sm">@{u.username}</span></p>
               <Presence online={a.online.has(u.id)} available={a.presenceAvailable} /></div>
             <button className="btn btn-ghost" onClick={() => void messageUser(u)}><MessageSquare size={16} />Message</button>
+            <button className={`btn ${u.is_following ? "btn-ghost" : "btn-primary"}`} disabled={followBusyId === u.id}
+              onClick={() => void toggleFollow(u)} aria-label={`${u.is_following ? "Unfollow" : "Follow"} ${u.display_name}`}>
+              {u.is_following ? <UserCheck size={16} /> : <UserPlus size={16} />}
+              <span className="hidden sm:inline">{followBusyId === u.id ? "Saving…" : u.is_following ? "Following" : "Follow"}</span>
+            </button>
           </li>
         ))}
         {visibleUsers?.length === 0 && deviceMatches.length === 0 && !err && <EmptyState text="No users found" />}

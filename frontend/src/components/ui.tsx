@@ -1,12 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { MessageSquareText } from "lucide-react";
+import { MessageCircle, UserRound, UsersRound } from "lucide-react";
 import type { ConnState } from "../types";
 import { APP_NAME } from "../config/brand";
 import { API_BASES } from "../config/env";
 
 export const initials = (n: string) => n.split(/\s+/).map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 
-export function Avatar({ name, size = 40, imageUrl }: { name: string; size?: number; imageUrl?: string | null }) {
+export function Avatar({ name, size = 40, imageUrl, kind = "user" }: {
+  name: string; size?: number; imageUrl?: string | null; kind?: "user" | "group";
+}) {
   const [baseIndex, setBaseIndex] = useState(0);
   useEffect(() => setBaseIndex(0), [imageUrl]);
   const src = imageUrl && baseIndex < API_BASES.length
@@ -16,22 +18,22 @@ export function Avatar({ name, size = 40, imageUrl }: { name: string; size?: num
     <div aria-hidden="true" className="shrink-0 overflow-hidden rounded-full bg-elevated border border-line text-amber font-semibold grid place-items-center"
       style={{ width: size, height: size, fontSize: size * 0.38 }}>
       {src ? <img src={src} alt="" className="h-full w-full object-cover"
-        onError={() => setBaseIndex((index) => Math.min(index + 1, API_BASES.length))} /> : initials(name) || "?"}
+        onError={() => setBaseIndex((index) => Math.min(index + 1, API_BASES.length))} />
+        : kind === "group" ? <UsersRound size={size * 0.52} strokeWidth={1.8} /> : <UserRound size={size * 0.52} strokeWidth={1.8} />}
     </div>
   );
 }
 
 export function BrandWordmark({ className = "" }: { className?: string }) {
-  const isVakochat = APP_NAME.toLocaleLowerCase() === "vakochat";
   return (
     <span role="img" aria-label={APP_NAME}
-      className={`inline-flex items-center whitespace-nowrap font-['Orbitron',sans-serif] font-bold tracking-[-0.06em] ${className}`}>
-      {isVakochat ? <>
-        <span>Vakoch</span>
-        <span aria-hidden="true" className="mx-[0.04em] inline-grid h-[0.9em] w-[0.9em] shrink-0 place-items-center rounded-[0.24em] bg-amber text-canvas">
-          <MessageSquareText className="h-[0.62em] w-[0.62em]" strokeWidth={2.5} />
-        </span>
-        <span>t</span>
+      className={`inline-flex items-center whitespace-nowrap text-amber ${className}`}
+      style={{ fontFamily: '"Orbitron", "Arial", sans-serif', letterSpacing: "0.025em", fontWeight: 700 }}>
+      {APP_NAME.toLocaleLowerCase() === "vakochat" ? <>
+        <span>V</span>
+        <MessageCircle aria-hidden="true" className="mx-[0.03em] inline-block h-[0.68em] w-[0.68em] shrink-0 fill-current stroke-[1.8] text-amber" />
+        <span className="sr-only">a</span>
+        <span>kochat</span>
       </> : APP_NAME}
     </span>
   );

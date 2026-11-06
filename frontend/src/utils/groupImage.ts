@@ -11,12 +11,12 @@ function canvasBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
   });
 }
 
-export async function prepareGroupImage(file: File): Promise<File> {
+export async function prepareGroupImage(file: File, label = "group picture"): Promise<File> {
   if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-    throw new Error("Choose a PNG, JPEG, or WebP group picture");
+    throw new Error(`Choose a PNG, JPEG, or WebP ${label}`);
   }
   if (file.size > MAX_SOURCE_BYTES) {
-    throw new Error("Choose a group picture smaller than 25 MB");
+    throw new Error(`Choose a ${label} smaller than 25 MB`);
   }
   if (file.size <= MAX_IMAGE_BYTES) return file;
 
@@ -24,7 +24,7 @@ export async function prepareGroupImage(file: File): Promise<File> {
   try {
     bitmap = await createImageBitmap(file);
   } catch {
-    throw new Error("This group picture could not be opened. Try another image");
+    throw new Error(`This ${label} could not be opened. Try another image`);
   }
 
   try {
@@ -34,7 +34,7 @@ export async function prepareGroupImage(file: File): Promise<File> {
       canvas.width = Math.max(1, Math.round(bitmap.width * scale));
       canvas.height = Math.max(1, Math.round(bitmap.height * scale));
       const context = canvas.getContext("2d");
-      if (!context) throw new Error("Your browser could not process this group picture");
+      if (!context) throw new Error(`Your browser could not process this ${label}`);
       context.fillStyle = "#fff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
@@ -50,7 +50,7 @@ export async function prepareGroupImage(file: File): Promise<File> {
 
       scale *= 0.8;
     }
-    throw new Error("This picture could not be reduced below 2 MB. Choose a smaller image");
+    throw new Error(`This ${label} could not be reduced below 2 MB. Choose a smaller image`);
   } finally {
     bitmap.close();
   }

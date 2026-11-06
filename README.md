@@ -31,6 +31,8 @@ Group conversations with multiple participants.
 Real-time message broadcasting through WebSockets.
 Conversation search and recent-chat ordering.
 Group descriptions and group pictures.
+Group invitations, administrator roles, member removal, and leaving groups.
+Member following, follower lists, and member profile views.
 Message replies, copying and forwarding.
 Message editing within five minutes of sending.
 Message deletion controls.
@@ -55,6 +57,11 @@ Optional Kenyan phone numbers using the +254 format.
 Profile picture uploads.
 Contact search and matching.
 Browser contact matching through the Contacts Picker API where supported.
+Follow and unfollow other users, with follower and following lists on your profile.
+Text and image stories with audience choices for everyone, followers, direct-message contacts, or both.
+Green rings mark unviewed stories; grey rings mark stories already viewed.
+A dedicated Stories page is available in desktop and mobile navigation.
+Users can apply for verification; administrators approve or deny applications before a verified badge is displayed.
 
 Contact information is not uploaded through the browser contact-matching feature until the user explicitly selects contacts through the feature.
 
@@ -81,6 +88,7 @@ Registered user and group statistics.
 Administrator account management.
 User search and account management.
 Account suspension and restoration.
+Verification application review and verified account approval.
 Recent administrative activity.
 Application-level node enable and disable controls.
 
@@ -556,7 +564,8 @@ To start a direct conversation:
 
 Open Contacts.
 Search for another registered Vakochat user.
-Select the user to open a conversation.
+Use Follow to add them to your following list, or Message to open a conversation.
+Your profile shows follower and following totals; select either total to browse the list.
 
 To create a group:
 
@@ -566,9 +575,19 @@ Provide a group name.
 Optionally add a description and group picture.
 Create the conversation.
 
+The group creator is an administrator. Open group information to invite users, promote or demote group administrators, remove members, follow members, view their followers, open member profiles, or leave the group. Group invitations must be accepted before membership is added.
+
 The Groups section provides a filtered view of group conversations.
 
-3. Sending and Managing Messages
+3. Stories and Verification
+
+Open Stories to post a text or image story. Stories expire after 24 hours. Choose an audience for each post: everyone, followers, direct-message contacts with whom you have exchanged messages, or both followers and direct-message contacts. The default audience is everyone.
+
+Use the horizontal story circles at the top of the page to browse active stories. A green ring indicates an unviewed story; a gray ring indicates that the stories have been viewed. The same row is used on the Messages page.
+
+From Profile, a user can apply for an account verification badge by providing a short reason. Applications remain pending until an administrator approves or denies them in the Admin dashboard's Verification Applications section. Only administrator approval grants the verified badge.
+
+4. Sending and Managing Messages
 
 Open a conversation and type your message in the composer.
 
@@ -589,13 +608,13 @@ Delivery ticks indicate delivery status, while colored double ticks indicate rea
 
 Group receipts represent recipient-specific delivery and read information.
 
-4. Message Information
+5. Message Information
 
 The message information interface provides additional details about a message, including its origin node, delivery information and available receipt status.
 
 This is particularly useful when demonstrating how messages move through the distributed infrastructure.
 
-5. Profile Management
+6. Profile Management
 
 Open Profile to update:
 
@@ -606,8 +625,12 @@ Phone number.
 Profile picture.
 
 Save the changes to update your profile.
+Your profile also shows your follower and following counts and provides access
+to the corresponding user lists. Select a person in either list to open their profile and follow or unfollow them.
 
-6. Appearance Settings
+The Account Verification section shows the current application status and lets you submit or resubmit a request for administrator review.
+
+7. Appearance Settings
 
 Open Settings to customize:
 
@@ -620,7 +643,7 @@ Reduced-motion preference.
 
 These options allow users to personalize the interface.
 
-7. Connectivity and Offline Behaviour
+8. Connectivity and Offline Behaviour
 
 Vakochat monitors its WebSocket connection and attempts to reconnect automatically when connectivity is interrupted.
 

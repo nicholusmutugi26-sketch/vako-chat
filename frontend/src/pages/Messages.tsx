@@ -1,13 +1,17 @@
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowLeft, Check, CheckCheck, Copy, Forward, ImagePlus, Info, MoreHorizontal, Pencil, Plus, Reply, Search, Send, Smile, Trash2, Users, X } from "lucide-react";
+import { ArrowLeft, Check, CheckCheck, Copy, Forward, ImagePlus, Info, LogOut, MailCheck, MessageSquarePlus, MoreHorizontal, Pause, Pencil, Play, Plus, Reply, Search, Send, Shield, ShieldOff, Smile, Trash2, UserCheck, UserPlus, UserRoundX, Users, X } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { Avatar, ConnectionBadge, EmptyState, Panel, Presence } from "../components/ui";
 import NewConversation from "../components/NewConversation";
-import type { ChatMessage } from "../types";
+import StoryRail from "../components/StoryRail";
+import UserProfileDialog from "../components/UserProfileDialog";
+import VerifiedBadge from "../components/VerifiedBadge";
+import { api } from "../services/api";
+import type { ChatMessage, GroupInvite, Member } from "../types";
 
 const hhmm = (iso: string | null) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
 const EmojiPicker = lazy(() => import("emoji-picker-react"));
-export default function Messages({ kind }: { kind: "all" | "group" }) {
+export default function Messages({ kind, onOpenStories }: { kind: "all" | "group"; onOpenStories: (userId?: string) => void }) {
   const a = useApp();
   const [q, setQ] = useState(""); const [text, setText] = useState("");
   const [showNew, setShowNew] = useState(false); const [showMembers, setShowMembers] = useState(false);
@@ -26,15 +30,34 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
   const [showUnreadCounts, setShowUnreadCounts] = useState(() => localStorage.getItem("vk_notify") !== "off");
   const [showPreviews, setShowPreviews] = useState(() => localStorage.getItem("vk_show_previews") !== "off");
   const [compactList, setCompactList] = useState(() => localStorage.getItem("vk_compact_list") === "on");
+  const [groupInvites, setGroupInvites] = useState<GroupInvite[]>([]);
+  const [groupInviteError, setGroupInviteError] = useState<string | null>(null);
+  const [inviteQuery, setInviteQuery] = useState("");
+  const [inviteUsers, setInviteUsers] = useState<Member[]>([]);
+  const [memberBusy, setMemberBusy] = useState<string | null>(null);
+  const [memberListTarget, setMemberListTarget] = useState<Member | null>(null);
+  const [memberFollowers, setMemberFollowers] = useState<Member[]>([]);
+  const [memberListError, setMemberListError] = useState<string | null>(null);
+  const [profileUserId, setProfileUserId] = useState<string | null>(null);
+  const [suggestedUsers, setSuggestedUsers] = useState<Member[]>([]);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+  const [mobileSplit, setMobileSplit] = useState(() => localStorage.getItem("vk_mobile_split") === "on");
+  const [selectingMessages, setSelectingMessages] = useState(false);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const groupAvatarInput = useRef<HTMLInputElement>(null);
   const end = useRef<HTMLDivElement>(null);
   const typingTimeout = useRef<number | null>(null);
   const lastTypingSent = useRef(0);
   const list = a.conversations
-    .filter((c) => (kind === "all" || c.kind === "group") && c.title.toLowerCase().includes(q.toLowerCase()))
+    .filter((c) => (kind === "all" ? c.kind === "direct" : c.kind === "group") && c.title.toLowerCase().includes(q.toLowerCase()))
     .sort((left, right) => (Date.parse(right.last_at ?? "") || 0) - (Date.parse(left.last_at ?? "") || 0));
-  const active = a.conversations.find((c) => c.id === a.activeId) ?? null;
+  const active = a.conversations.find((c) => c.id === a.activeId &&
+    (kind === "all" ? c.kind === "direct" : c.kind === "group")) ?? null;
+  const directChatMember = active?.kind === "direct"
+    ? active.members.find((member) => member.id !== a.user?.id)
+    : null;
   const editingGroup = a.conversations.find((conversation) => conversation.id === editingGroupId && conversation.kind === "group");
   const msgs = (active && a.messages[active.id]) || [];
   useEffect(() => {
@@ -42,10 +65,46 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
       setShowUnreadCounts(localStorage.getItem("vk_notify") !== "off");
       setShowPreviews(localStorage.getItem("vk_show_previews") !== "off");
       setCompactList(localStorage.getItem("vk_compact_list") === "on");
+      setMobileSplit(localStorage.getItem("vk_mobile_split") === "on");
     };
     window.addEventListener("vk-settings-updated", updatePreferences);
     return () => window.removeEventListener("vk-settings-updated", updatePreferences);
   }, []);
+  useEffect(() => {
+    if (kind !== "all" || list.length > 0) {
+      setSuggestedUsers([]);
+      return;
+    }
+    let activeEffect = true;
+    void api.users().then((users) => {
+      if (activeEffect) {
+        setSuggestedUsers(users.slice(0, 6));
+        setSuggestionError(null);
+      }
+    }).catch((error: unknown) => {
+      if (activeEffect) setSuggestionError(error instanceof Error ? error.message : "Suggested people could not be loaded");
+    });
+    return () => { activeEffect = false; };
+  }, [kind, list.length]);
+  async function messageSuggestedUser(member: Member) {
+    try {
+      const conversationId = await a.openDirect(member.id);
+      a.select(conversationId);
+      setShowNew(false);
+    } catch (error) {
+      setSuggestionError(error instanceof Error ? error.message : "Conversation could not be started");
+    }
+  }
+  async function followSuggestedUser(member: Member) {
+    try {
+      const result = member.is_following ? await api.unfollowUser(member.id) : await api.followUser(member.id);
+      setSuggestedUsers((current) => current.map((item) => item.id === member.id
+        ? { ...item, is_following: result.is_following, follower_count: result.followers }
+        : item));
+    } catch (error) {
+      setSuggestionError(error instanceof Error ? error.message : "Follow status could not be updated");
+    }
+  }
   useEffect(() => {
     if (!menuFor) return;
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
@@ -56,10 +115,44 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
     : "";
   useEffect(() => { end.current?.scrollIntoView({ block: "end" }); }, [msgs.length, active?.id]);
   useEffect(() => {
+    setSelectingMessages(false);
+    setSelectedMessageIds(new Set());
+  }, [active?.id]);
+  useEffect(() => {
     if (!active || active.kind !== "group") return;
     setGroupTitle(active.title);
     setGroupDescription(active.description);
   }, [active?.id, active?.title, active?.description]);
+  useEffect(() => {
+    if (kind !== "group") return;
+    let activeEffect = true;
+    const loadInvites = () => void api.groupInvites().then((items) => {
+      if (activeEffect) {
+        setGroupInvites(items);
+        setGroupInviteError(null);
+      }
+    }).catch((error: unknown) => {
+      if (activeEffect) setGroupInviteError(error instanceof Error ? error.message : "Group invitations could not be loaded");
+    });
+    loadInvites();
+    const interval = window.setInterval(loadInvites, 15000);
+    return () => { activeEffect = false; window.clearInterval(interval); };
+  }, [kind]);
+  useEffect(() => {
+    if (!active || active.kind !== "group" || !showMembers || !active.is_admin || !inviteQuery.trim()) {
+      setInviteUsers([]);
+      return;
+    }
+    let current = true;
+    const timeout = window.setTimeout(() => {
+      void api.users(inviteQuery).then((users) => {
+        if (current) setInviteUsers(users.filter((candidate) => !active.members.some((member) => member.id === candidate.id)));
+      }).catch((error: unknown) => {
+        if (current) setActionNotice(error instanceof Error ? error.message : "Users could not be searched");
+      });
+    }, 250);
+    return () => { current = false; window.clearTimeout(timeout); };
+  }, [active?.id, active?.members, active?.is_admin, inviteQuery, showMembers]);
   useEffect(() => {
     const conversationId = active?.id;
     return () => {
@@ -152,20 +245,181 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
       setGroupAvatarMenuOpen(false);
     }
   }
+  async function respondToInvite(invite: GroupInvite, accept: boolean) {
+    setMemberBusy(invite.id);
+    setGroupInviteError(null);
+    try {
+      if (accept) {
+        const joined = await api.acceptGroupInvite(invite.id);
+        await a.refreshConversations();
+        a.select(joined.id);
+      } else {
+        await api.declineGroupInvite(invite.id);
+      }
+      setGroupInvites((current) => current.filter((item) => item.id !== invite.id));
+    } catch (error) {
+      setGroupInviteError(error instanceof Error ? error.message : "Invitation could not be updated");
+    } finally {
+      setMemberBusy(null);
+    }
+  }
+  async function inviteMember(member: Member) {
+    if (!active || active.kind !== "group") return;
+    setMemberBusy(member.id);
+    try {
+      await api.inviteToGroup(active.id, member.id);
+      setActionNotice(`Invitation sent to ${member.display_name}`);
+      setInviteUsers((current) => current.filter((candidate) => candidate.id !== member.id));
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Invitation could not be sent");
+    } finally {
+      setMemberBusy(null);
+    }
+  }
+  async function toggleMemberFollow(member: Member) {
+    setMemberBusy(member.id);
+    try {
+      if (member.is_following) await api.unfollowUser(member.id);
+      else await api.followUser(member.id);
+      await a.refreshConversations();
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Follow status could not be updated");
+    } finally {
+      setMemberBusy(null);
+    }
+  }
+  async function changeMemberAdmin(member: Member, enabled: boolean) {
+    if (!active || active.kind !== "group") return;
+    setMemberBusy(member.id);
+    try {
+      await api.setGroupAdmin(active.id, member.id, enabled);
+      await a.refreshConversations();
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Group role could not be changed");
+    } finally {
+      setMemberBusy(null);
+    }
+  }
+  async function removeMember(member: Member) {
+    if (!active || active.kind !== "group" || !window.confirm(`Remove ${member.display_name} from ${active.title}?`)) return;
+    setMemberBusy(member.id);
+    try {
+      await api.removeGroupMember(active.id, member.id);
+      await a.refreshConversations();
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Member could not be removed");
+    } finally {
+      setMemberBusy(null);
+    }
+  }
+  async function leaveActiveGroup() {
+    if (!active || active.kind !== "group" || !window.confirm(`Leave ${active.title}? You will need a new invitation to rejoin.`)) return;
+    setMemberBusy(active.id);
+    try {
+      await api.leaveGroup(active.id);
+      a.select(null);
+      await a.refreshConversations();
+      setShowMembers(false);
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Could not leave the group");
+    } finally {
+      setMemberBusy(null);
+    }
+  }
+  async function showMemberFollowers(member: Member) {
+    setMemberListTarget(member);
+    setMemberFollowers([]);
+    setMemberListError(null);
+    try {
+      setMemberFollowers(await api.followers(member.id));
+    } catch (error) {
+      setMemberListError(error instanceof Error ? error.message : "Followers could not be loaded");
+    }
+  }
+  async function deleteConversation() {
+    if (!active || active.kind !== "direct" ||
+        !window.confirm(`Remove your conversation with ${active.title}? It will be hidden only for you; the other person keeps their history.`)) return;
+    setActionNotice(null);
+    try {
+      await a.hideConversation(active.id);
+      setSelectingMessages(false);
+      setSelectedMessageIds(new Set());
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Conversation could not be removed");
+    }
+  }
+  async function deleteSelectedMessages() {
+    if (!active || selectedMessageIds.size === 0 || !window.confirm(
+      `Delete ${selectedMessageIds.size} selected message${selectedMessageIds.size === 1 ? "" : "s"} for everyone? Only messages you sent are eligible.`,
+    )) return;
+    setBulkDeleteBusy(true);
+    setActionNotice(null);
+    try {
+      await a.removeMessages([...selectedMessageIds], active.id);
+      setSelectedMessageIds(new Set());
+      setSelectingMessages(false);
+    } catch (error) {
+      setActionNotice(error instanceof Error ? error.message : "Selected messages could not be deleted");
+    } finally {
+      setBulkDeleteBusy(false);
+    }
+  }
+  function toggleMessageSelection(messageId: string) {
+    setSelectedMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+  }
   return (
-    <div className="flex h-full min-h-0 gap-3">
+    <div className={`messages-layout flex h-full min-h-0 gap-3 ${mobileSplit ? "mobile-split" : ""}`}>
       {/* conversation column: hidden on mobile when a chat is open */}
-      <Panel className={`${active ? "hidden md:flex" : "flex"} flex-col w-full md:w-72 shrink-0 min-h-0`}>
-        <div className="p-3 flex items-center justify-between">
-          <h2 className="font-semibold">{kind === "group" ? "Groups" : "Conversations"}</h2>
-          <button className="btn btn-ghost !px-2" aria-label="New conversation" onClick={() => setShowNew(true)}><Plus size={18} /></button>
+      <Panel className={`relative ${active && !mobileSplit ? "hidden md:flex" : "flex"} flex-col w-full md:w-72 shrink-0 min-h-0 mobile-split-list`}>
+        {kind === "group" && <div className="p-3 flex items-center justify-between">
+          <h2 className="font-semibold">Groups</h2>
+          <button className="btn btn-ghost !px-2" aria-label="New group" onClick={() => setShowNew(true)}><Plus size={18} /></button>
+        </div>}
+        {kind === "all" && <StoryRail onOpen={onOpenStories} />}
+        {kind === "group" && groupInvites.length > 0 && <section className="mx-3 mb-3 rounded-xl border border-amber/25 bg-amber/5 p-3">
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><MailCheck size={16} className="text-amber" />Group invitations <span className="ml-auto rounded-full bg-amber px-2 py-0.5 text-xs text-canvas">{groupInvites.length}</span></h3>
+          <div className="space-y-2">
+            {groupInvites.map((invite) => <div key={invite.id} className="rounded-lg border border-line bg-panel p-2.5">
+              <p className="truncate text-sm font-medium">{invite.title}</p>
+              <p className="mt-0.5 text-xs text-dim">Invited by {invite.inviter_name} (@{invite.inviter_username})</p>
+              <div className="mt-2 flex gap-2">
+                <button type="button" className="btn btn-primary !min-h-9 flex-1 !px-2 text-xs" disabled={memberBusy === invite.id}
+                  onClick={() => void respondToInvite(invite, true)}><Check size={14} />Accept</button>
+                <button type="button" className="btn btn-ghost !min-h-9 flex-1 !px-2 text-xs" disabled={memberBusy === invite.id}
+                  onClick={() => void respondToInvite(invite, false)}><X size={14} />Decline</button>
+              </div>
+            </div>)}
+          </div>
+          {groupInviteError && <p role="alert" className="mt-2 text-xs text-bad">{groupInviteError}</p>}
+        </section>}
+        <div className="mt-2 flex items-center gap-2 px-3 pb-2">
+          <div className="relative min-w-0 flex-1">
+            <Search size={16} aria-hidden="true" className="pointer-events-none absolute left-3 top-3 text-muted" />
+            <input className="field !pl-10" placeholder={kind === "group" ? "Search groups…" : "Search messages…"} aria-label={kind === "group" ? "Search groups" : "Search messages"} value={q} onChange={(e) => setQ(e.target.value)} />
+          </div>
         </div>
-        <div className="px-3 pb-2 relative">
-          <Search size={16} aria-hidden="true" className="pointer-events-none absolute left-5 top-3 text-muted" />
-          <input className="field !pl-12" placeholder="Search conversations…" aria-label="Search conversations" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
-        <ul className="flex-1 overflow-y-auto">
-          {list.length === 0 && <EmptyState text="No conversations" />}
+        <ul className={`flex-1 overflow-y-auto ${kind === "all" ? "pb-20" : ""}`}>
+          {list.length === 0 && kind === "all" && suggestedUsers.length > 0
+            ? <li className="p-3">
+              <h3 className="mb-1 text-sm font-semibold">People to get started with</h3>
+              <p className="mb-3 text-xs text-dim">Start a conversation and follow people you know.</p>
+              <ul className="space-y-2">{suggestedUsers.map((member) => <li key={member.id} className="flex min-w-0 items-center gap-2 rounded-xl border border-line bg-elevated/30 p-2">
+                <Avatar name={member.display_name} imageUrl={member.avatar_url} size={34} />
+                <span className="min-w-0 flex-1 truncate text-xs font-medium">{member.display_name}</span>
+                <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg hover:bg-panel" title="Start conversation"
+                  aria-label={`Message ${member.display_name}`} onClick={() => void messageSuggestedUser(member)}><MessageSquarePlus size={16} /></button>
+                <button type="button" className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg hover:bg-panel ${member.is_following ? "text-amber" : ""}`}
+                  title={member.is_following ? "Unfollow" : "Follow"} aria-label={`${member.is_following ? "Unfollow" : "Follow"} ${member.display_name}`}
+                  onClick={() => void followSuggestedUser(member)}>{member.is_following ? <UserCheck size={16} /> : <UserPlus size={16} />}</button>
+              </li>)}</ul>
+              {suggestionError && <p role="alert" className="mt-2 text-xs text-bad">{suggestionError}</p>}
+            </li>
+            : list.length === 0 && <EmptyState text={kind === "group" ? "No groups yet" : "No conversations yet"} />}
           {list.map((c) => {
             const lastMessageIsMine = c.last_message_sender_id === a.user?.id;
             const lastMessageStatus = c.last_message_status ?? "sent";
@@ -173,9 +427,10 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
             return <li key={c.id} className="border-b border-line">
               <button onClick={() => a.select(c.id)} aria-current={c.id === a.activeId}
                 className={`w-full text-left flex gap-3 items-center ${compactList ? "p-2 min-h-[48px]" : "p-3 min-h-[56px]"} ${c.id === a.activeId ? "bg-elevated border-l-2 border-amber" : "hover:bg-elevated border-l-2 border-transparent"}`}>
-                <Avatar name={c.title} imageUrl={c.kind === "direct" ? c.members.find((m) => m.id !== a.user?.id)?.avatar_url : c.avatar_url} />
+                <Avatar name={c.title} kind={c.kind === "group" ? "group" : "user"}
+                  imageUrl={c.kind === "direct" ? c.members.find((m) => m.id !== a.user?.id)?.avatar_url : c.avatar_url} />
                 <div className="min-w-0 flex-1">
-                  <div className="flex justify-between gap-2"><span className="truncate font-medium">{c.title}</span><span className="text-xs text-muted">{hhmm(c.last_at)}</span></div>
+                  <div className="flex justify-between gap-2"><span className="flex min-w-0 items-center gap-1 truncate font-medium">{c.title}{c.kind === "direct" && c.members.find((m) => m.id !== a.user?.id)?.is_verified && <VerifiedBadge className="h-3 w-3" />}</span><span className="text-xs text-muted">{hhmm(c.last_at)}</span></div>
                   <div className="flex min-w-0 items-center gap-2">
                   <span className={`min-w-0 flex-1 truncate text-sm ${typingUsers.length ? "text-amber" : "text-dim"}`}>
                     {typingUsers.length
@@ -199,42 +454,91 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
             </li>;
           })}
         </ul>
+        {kind === "all" && !active && <button type="button" className="absolute bottom-4 right-4 z-10 grid h-14 w-14 place-items-center rounded-full bg-amber text-canvas shadow-xl transition hover:scale-105"
+          aria-label="Start a conversation" title="Start a conversation" onClick={() => setShowNew(true)}><MessageSquarePlus size={23} /></button>}
       </Panel>
 
-      <Panel className={`${active ? "flex" : "hidden md:flex"} flex-col flex-1 min-w-0 min-h-0`}>
+      <Panel className={`${active || mobileSplit ? "flex" : "hidden md:flex"} flex-col flex-1 min-w-0 min-h-0 mobile-split-chat`}>
         {!active ? <EmptyState text="Select a conversation" /> : (<>
           <header className="p-3 border-b border-line flex items-center gap-3">
             <button className="md:hidden btn btn-ghost !px-2" aria-label="Back" onClick={() => a.select(null)}><ArrowLeft size={18} /></button>
-            <Avatar name={active.title} imageUrl={active.kind === "direct" ? active.members.find((m) => m.id !== a.user?.id)?.avatar_url : active.avatar_url} />
-            <div className="min-w-0 flex-1"><h2 className="font-semibold truncate">{active.title}</h2>
+            <button type="button" className="shrink-0 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber"
+              onClick={() => active.kind === "group" ? setShowMembers(true) : directChatMember && setProfileUserId(directChatMember.id)}
+              aria-label={active.kind === "group" ? "Open group information" : `View ${directChatMember?.display_name ?? active.title}'s profile`}>
+              <Avatar name={active.title} kind={active.kind === "group" ? "group" : "user"}
+                imageUrl={active.kind === "direct" ? directChatMember?.avatar_url : active.avatar_url} />
+            </button>
+            <button type="button" className="min-w-0 flex-1 text-left"
+              onClick={() => {
+                if (active.kind === "group") setShowMembers(true);
+                else if (directChatMember) setProfileUserId(directChatMember.id);
+              }}>
+              <h2 className="flex items-center gap-1 truncate font-semibold">{active.title}{directChatMember?.is_verified && <VerifiedBadge className="h-4 w-4" />}</h2>
               <p className="truncate text-xs text-dim">{active.kind === "group"
                 ? active.description || `${active.members.length} members · Group`
-                : "Direct message"}</p></div>
-            <ConnectionBadge state={a.conn} />
-            {active.kind === "group" && <>
+                : "Direct message"}</p>
+            </button>
+            <span className="hidden sm:inline-flex"><ConnectionBadge state={a.conn} /></span>
+            <button type="button" className={`btn btn-ghost !px-2 ${selectingMessages ? "text-amber" : ""}`}
+              aria-pressed={selectingMessages} aria-label={selectingMessages ? "Cancel message selection" : "Select messages"}
+              title={selectingMessages ? "Cancel selection" : "Select messages"}
+              onClick={() => {
+                setSelectingMessages((current) => !current);
+                setSelectedMessageIds(new Set());
+              }}>
+              {selectingMessages ? <X size={17} /> : <CheckCheck size={17} />}
+            </button>
+            {active.kind === "direct" && <button type="button" className="btn btn-ghost !px-2 text-bad"
+              aria-label="Remove conversation for me" title="Remove conversation for me" onClick={() => void deleteConversation()}>
+              <Trash2 size={17} />
+            </button>}
+            {active.kind === "group" && active.is_admin && <>
               <button className="btn btn-ghost !px-2" aria-label="Edit group details" title="Edit group details"
                 onClick={() => { setGroupTitle(active.title); setGroupDescription(active.description); setEditingGroupId(active.id); }}>
                 <Pencil size={17} />
               </button>
-              <button className="btn btn-ghost !px-2" aria-label="Members" onClick={() => setShowMembers((s) => !s)}><Users size={18} /></button>
             </>}
+            {active.kind === "group" && <button className="btn btn-ghost !px-2" aria-label="Group members and actions" title="Group members and actions"
+              onClick={() => setShowMembers((s) => !s)}><Users size={18} /></button>}
           </header>
-          <div className="flex flex-1 min-h-0">
+          {selectingMessages && <div className="flex flex-wrap items-center gap-2 border-b border-line bg-elevated/30 px-3 py-2">
+            <span className="mr-auto text-xs text-dim">{selectedMessageIds.size} selected · select messages you sent</span>
+            <button type="button" className="btn btn-ghost !min-h-9 !px-3 text-xs" disabled={!msgs.some((message) => message.sender_id === a.user?.id)}
+              onClick={() => setSelectedMessageIds(new Set(msgs.filter((message) => message.sender_id === a.user?.id).map((message) => message.id)))}>
+              Select mine
+            </button>
+            <button type="button" className="btn btn-ghost !min-h-9 !px-3 text-xs" onClick={() => setSelectedMessageIds(new Set())}>
+              Clear
+            </button>
+            <button type="button" className="btn !min-h-9 !px-3 text-xs text-bad" disabled={selectedMessageIds.size === 0 || bulkDeleteBusy}
+              onClick={() => void deleteSelectedMessages()}>
+              <Trash2 size={14} />{bulkDeleteBusy ? "Deleting…" : "Delete"}
+            </button>
+          </div>}
+          <div className="relative flex flex-1 min-h-0">
             <div className="flex-1 flex flex-col min-w-0">
               <div className="flex-1 overflow-y-auto p-4 space-y-3" aria-live="polite">
                 {msgs.length === 0 && <EmptyState text="No messages yet. Say hello." />}
                 {msgs.map((m) => {
                   const mine = m.sender_id === a.user?.id;
+                  const senderMember = active.members.find((member) => member.id === m.sender_id);
                   const rawStatus = mine ? (a.messageStatus[m.id] ?? m.status ?? "sent") : undefined;
                   const editAge = clock - Date.parse(m.created_at);
                   const canEdit = mine && editAge >= 0 && editAge <= 5 * 60 * 1000;
                   return (
-                    <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                    <div key={m.id} className={`flex items-center gap-2 ${mine ? "justify-end" : "justify-start"}`}>
+                      {selectingMessages && mine && <input type="checkbox" className="h-5 w-5 shrink-0 accent-amber"
+                        aria-label={`Select your message from ${hhmm(m.created_at)}`}
+                        checked={selectedMessageIds.has(m.id)} onChange={() => toggleMessageSelection(m.id)} />}
                       <div className={`relative max-w-[80%] rounded-lg px-3 py-2 border ${mine ? "bg-amber-soft/30 border-amber-soft" : "bg-elevated border-line"}`}>
-                        <div className="flex items-center gap-3 text-xs text-dim mb-0.5">
-                          <span>{mine ? "You" : m.sender_name} · {hhmm(m.created_at)}</span>
-                          <button className="rounded p-1 hover:bg-line" aria-label="Message options" title="Message options"
-                            onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}><MoreHorizontal size={16} /></button>
+                        <div className="mb-0.5 flex items-center gap-3 text-xs text-dim">
+                          <span className="flex min-w-0 items-center gap-1">
+                            {mine ? "You" : m.sender_name}
+                            {senderMember?.is_verified && <VerifiedBadge className="h-3 w-3" />}
+                            <span>· {hhmm(m.created_at)}</span>
+                          </span>
+                          {!selectingMessages && <button className="rounded p-1 hover:bg-line" aria-label="Message options" title="Message options"
+                            onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}><MoreHorizontal size={16} /></button>}
                         </div>
                         {editing === m.id ? <div className="mt-2 space-y-2">
                           <textarea className="field min-h-20" aria-label="Edit message" value={editText} maxLength={4000} onChange={(e) => setEditText(e.target.value)} />
@@ -307,14 +611,15 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
                 <span className="truncate">Replying to {replyTo.sender_name}: {replyTo.text}</span>
                 <button aria-label="Cancel reply" className="ml-2" onClick={() => setReplyTo(null)}><X size={15} /></button>
               </div>}
-              <form onSubmit={submit} className="relative flex gap-2 border-t border-line p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+              <form onSubmit={submit} className="message-composer relative flex shrink-0 gap-2 border-t border-line p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
                 {showEmoji && <div className="absolute bottom-full right-14 z-20 mb-2 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-line shadow-xl">
                   <Suspense fallback={<div className="grid h-[400px] w-[min(350px,calc(100vw-2rem))] place-items-center bg-sidebar text-sm text-dim">Loading emojis…</div>}>
                     <EmojiPicker theme="dark" onEmojiClick={(emoji) => insertEmoji(emoji.emoji)}
                       previewConfig={{ showPreview: false }} width={Math.min(350, window.innerWidth - 32)} height={400} />
                   </Suspense>
                 </div>}
-                <input ref={input} className="field flex-1" placeholder={replyTo ? `Reply to ${replyTo.sender_name}…` : "Type a message…"} aria-label="Message" value={text}
+                <input ref={input} type="text" inputMode="text" enterKeyHint="send" autoCapitalize="sentences" autoCorrect="on"
+                  className="message-composer-input field min-w-0 flex-1" placeholder={replyTo ? `Reply to ${replyTo.sender_name}…` : "Type a message…"} aria-label="Message" value={text}
                   maxLength={4000 - replyPrefix.length} onChange={(e) => changeText(e.target.value)} />
                 <button type="button" className="btn btn-ghost !px-3" aria-label="Choose emoji" aria-expanded={showEmoji}
                   onClick={() => setShowEmoji((visible) => !visible)}><Smile size={19} /></button>
@@ -322,12 +627,71 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
               </form>
             </div>
             {showMembers && active.kind === "group" && (
-              <aside className="w-56 border-l border-line overflow-y-auto absolute md:static right-0 bg-panel h-full md:h-auto z-10 md:z-auto" aria-label="Group members">
-                <h3 className="p-3 font-semibold text-sm">Members ({active.members.length})</h3>
+              <aside className="absolute inset-0 z-20 flex w-full flex-col overflow-y-auto border-l border-line bg-panel shadow-xl sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[min(22rem,90vw)] md:static md:w-80 md:shrink-0 md:shadow-none" aria-label="Group information and members">
+                <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-panel/95 p-4 backdrop-blur">
+                  <Avatar name={active.title} kind="group" imageUrl={active.avatar_url} size={48} />
+                  <div className="min-w-0 flex-1"><h3 className="truncate font-semibold">{active.title}</h3>
+                    <p className="text-xs text-dim">{active.members.length} members{active.is_admin ? " · Admin" : ""}</p></div>
+                  <button type="button" className="btn btn-ghost !min-h-9 !px-2" aria-label="Close group information" onClick={() => setShowMembers(false)}><X size={18} /></button>
+                </header>
+                {active.description && <p className="border-b border-line px-4 py-3 text-sm text-dim">{active.description}</p>}
+                {active.is_admin && <section className="border-b border-line p-3">
+                  <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-dim">Invite people</h4>
+                  <div className="relative">
+                    <Search size={15} className="pointer-events-none absolute left-3 top-3 text-muted" />
+                    <input className="field !pl-9" value={inviteQuery} onChange={(event) => setInviteQuery(event.target.value)} placeholder="Search users to invite…" aria-label="Search users to invite" />
+                  </div>
+                  {inviteUsers.length > 0 && <ul className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-line">
+                    {inviteUsers.slice(0, 6).map((candidate) => <li key={candidate.id} className="flex items-center gap-2 p-2">
+                      <Avatar name={candidate.display_name} imageUrl={candidate.avatar_url} size={32} />
+                      <span className="min-w-0 flex-1 truncate text-xs">{candidate.display_name}</span>
+                      <button type="button" className="btn btn-ghost !min-h-8 !px-2" aria-label={`Invite ${candidate.display_name}`} disabled={memberBusy === candidate.id}
+                        onClick={() => void inviteMember(candidate)}><UserPlus size={15} /></button>
+                    </li>)}
+                  </ul>}
+                </section>}
+                <h4 className="px-4 pb-2 pt-3 text-xs font-semibold uppercase tracking-wide text-dim">Members · {active.members.length}</h4>
                 {active.members.map((m) => (
-                  <div key={m.id} className="flex items-center gap-2 px-3 py-2"><Avatar name={m.display_name} size={32} imageUrl={m.avatar_url} />
-                    <div className="min-w-0"><p className="truncate text-sm">{m.display_name}</p><Presence online={a.online.has(m.id)} available={a.presenceAvailable} /></div></div>
+                  <div key={m.id} className="mx-2 mb-1 rounded-xl border border-transparent p-2 hover:border-line hover:bg-elevated">
+                    <div className="flex items-center gap-2">
+                      <button type="button" className="shrink-0 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber"
+                        aria-label={`View ${m.display_name}'s profile`} onClick={() => setProfileUserId(m.id)}>
+                        <Avatar name={m.display_name} size={40} imageUrl={m.avatar_url} />
+                      </button>
+                      <div className="min-w-0 flex-1"><div className="flex min-w-0 items-center gap-2">
+                        <button type="button" className="flex min-w-0 max-w-full items-center gap-1 text-left text-sm font-medium hover:text-amber"
+                          onClick={() => setProfileUserId(m.id)}><span className="truncate">{m.display_name}{m.id === a.user?.id ? " (you)" : ""}</span>{m.is_verified && <VerifiedBadge className="h-[14px] w-[14px]" />}</button>
+                        {m.is_admin && <span className="shrink-0 text-[10px] text-amber">Group admin</span>}
+                        </div><div className="flex items-center gap-2"><Presence online={a.online.has(m.id)} available={a.presenceAvailable} /></div>
+                      </div>
+                      {m.id !== a.user?.id && <button type="button" className={`btn !min-h-9 !px-2.5 text-xs ${m.is_following ? "btn-ghost" : "btn-primary"}`} disabled={memberBusy === m.id}
+                        aria-label={`${m.is_following ? "Unfollow" : "Follow"} ${m.display_name}`} title={m.is_following ? "Unfollow" : "Follow"}
+                        onClick={() => void toggleMemberFollow(m)}>{m.is_following ? <UserCheck size={15} /> : <UserPlus size={15} />}{m.is_following ? "Following" : "Follow"}</button>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center justify-between gap-1 pl-12">
+                      <button type="button" className="min-h-9 rounded-md px-2 text-left text-xs text-dim hover:bg-panel hover:text-amber"
+                        onClick={() => void showMemberFollowers(m)}>
+                        View {m.follower_count ?? 0} followers
+                      </button>
+                      {active.is_admin && m.id !== a.user?.id && <div className="flex gap-1">
+                        <button type="button" className="btn btn-ghost !min-h-9 !px-2 text-xs" disabled={memberBusy === m.id}
+                          title={m.is_admin ? "Remove admin" : "Make admin"} aria-label={`${m.is_admin ? "Remove admin from" : "Make"} ${m.display_name}`}
+                          onClick={() => void changeMemberAdmin(m, !m.is_admin)}>
+                          {m.is_admin ? <ShieldOff size={13} /> : <Shield size={13} />}{m.is_admin ? "Demote" : "Make admin"}
+                        </button>
+                        <button type="button" className="btn btn-ghost !min-h-9 !px-2 text-xs text-bad" disabled={memberBusy === m.id}
+                          title="Remove from group" aria-label={`Remove ${m.display_name} from group`} onClick={() => void removeMember(m)}>
+                          <UserRoundX size={13} />Remove
+                        </button>
+                      </div>}
+                    </div>
+                  </div>
                 ))}
+                {actionNotice && <p role="status" className="px-4 py-2 text-xs text-dim">{actionNotice}</p>}
+                <div className="mt-auto border-t border-line p-3">
+                  {active.id !== "general" && <button type="button" className="btn btn-ghost w-full justify-center text-bad" disabled={memberBusy === active.id}
+                    onClick={() => void leaveActiveGroup()}><LogOut size={16} />Leave group</button>}
+                </div>
               </aside>
             )}
           </div>
@@ -351,7 +715,7 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
             </label>
             <div className="flex items-center gap-3 rounded-md border border-line bg-elevated/30 p-3">
               <div className="relative">
-                <Avatar name={editingGroup.title} size={56} imageUrl={editingGroup.avatar_url} />
+                <Avatar name={editingGroup.title} kind="group" size={56} imageUrl={editingGroup.avatar_url} />
                 <button type="button" className="absolute -bottom-1 -right-1 grid h-8 w-8 place-items-center rounded-full border border-line bg-elevated text-ink hover:bg-line"
                   aria-label="Edit group picture" aria-expanded={groupAvatarMenuOpen} disabled={groupAvatarBusy}
                   onClick={() => setGroupAvatarMenuOpen((open) => !open)}><Pencil size={15} /></button>
@@ -385,6 +749,26 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
           </div>
         </Panel>
       </div>}
+      {memberListTarget && <div className="fixed inset-0 z-50 grid place-items-center bg-black/65 p-3" role="dialog" aria-modal="true" aria-label={`${memberListTarget.display_name}'s followers`}>
+        <Panel className="flex max-h-[min(80dvh,38rem)] w-full max-w-sm flex-col overflow-hidden shadow-2xl">
+          <header className="flex items-center gap-3 border-b border-line p-4">
+            <Avatar name={memberListTarget.display_name} imageUrl={memberListTarget.avatar_url} size={38} />
+            <div className="min-w-0 flex-1"><h2 className="truncate font-semibold">{memberListTarget.display_name}</h2><p className="text-xs text-dim">Followers</p></div>
+            <button type="button" className="btn btn-ghost !min-h-9 !px-2" aria-label="Close followers" onClick={() => setMemberListTarget(null)}><X size={18} /></button>
+          </header>
+          <div className="overflow-y-auto p-2">
+            {memberListError && <p role="alert" className="p-4 text-sm text-bad">{memberListError}</p>}
+            {!memberListError && memberFollowers.length === 0 && <p className="p-4 text-center text-sm text-dim">No followers yet.</p>}
+            {memberFollowers.map((follower) => <button type="button" key={follower.id} onClick={() => setProfileUserId(follower.id)}
+              className="flex w-full items-center gap-3 rounded-xl p-3 text-left hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber">
+              <Avatar name={follower.display_name} imageUrl={follower.avatar_url} size={38} />
+              <div className="min-w-0 flex-1"><p className="flex items-center gap-1 truncate text-sm font-medium">{follower.display_name}{follower.is_verified && <VerifiedBadge className="h-[14px] w-[14px]" />}</p><p className="truncate text-xs text-dim">@{follower.username}</p></div>
+              <span className="text-xs text-dim">Profile</span>
+            </button>)}
+          </div>
+        </Panel>
+      </div>}
+      {profileUserId && <UserProfileDialog userId={profileUserId} onClose={() => setProfileUserId(null)} />}
       {forwarding && <div className="fixed inset-0 z-30 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Forward message">
         <Panel className="w-full max-w-sm p-4"><div className="mb-3 flex items-center justify-between">
           <h2 className="font-semibold">Forward message</h2><button aria-label="Close" onClick={() => setForwarding(null)}><X size={18} /></button></div>
@@ -396,7 +780,7 @@ export default function Messages({ kind }: { kind: "all" | "group" }) {
           ))}</ul>
         </Panel>
       </div>}
-      {showNew && <NewConversation onClose={() => setShowNew(false)} />}
+      {showNew && <NewConversation allowGroups={kind === "group"} onClose={() => setShowNew(false)} />}
     </div>
   );
 }

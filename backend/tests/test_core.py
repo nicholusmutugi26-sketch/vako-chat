@@ -1,9 +1,9 @@
 """Run: PYTHONPATH=. pytest (no Redis needed: auth, membership, chat, and profile features)."""
-import asyncio, json, os, tempfile
+import asyncio, json, os, tempfile, time
 os.environ["DATABASE_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
 from app import db
 from app.auth import check_pw, hash_pw, make_token, decode_token
-from app.schemas import EventEnvelope, SendIn, TypingEnvelope, TypingIn
+from app.schemas import BulkDeleteMessagesIn, EventEnvelope, SendIn, TypingEnvelope, TypingIn
 import pytest
 
 
@@ -101,12 +101,140 @@ def test_membership_isolated():
     assert db.create_conversation("direct", None, b, [a]) == cid  # no duplicate DMs
 
 
+def test_direct_conversation_can_be_hidden_for_one_user_and_restored():
+    db.init_db()
+    alice = db.create_user("hide-alice", "Alice", "x")
+    bob = db.create_user("hide-bob", "Bob", "x")
+    cid = db.create_conversation("direct", None, alice, [bob])
+
+    assert cid in {item["id"] for item in db.list_conversations(alice)}
+    assert db.hide_conversation(cid, alice) == "hidden"
+    assert cid not in {item["id"] for item in db.list_conversations(alice)}
+    assert cid in {item["id"] for item in db.list_conversations(bob)}
+    assert db.hide_conversation(cid, bob) == "hidden"
+    assert cid not in {item["id"] for item in db.list_conversations(bob)}
+
+    from datetime import datetime, timedelta, timezone
+    later = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+    db.save_message("hide-new-message", cid, bob, "A new message", "node-1", later)
+    assert cid in {item["id"] for item in db.list_conversations(alice)}
+    assert db.create_conversation("direct", None, alice, [bob]) == cid
+
+    group_id = db.create_conversation("group", "Hidden group", alice, [bob])
+    assert db.hide_conversation(group_id, alice) == "group"
+    assert group_id in {item["id"] for item in db.list_conversations(alice)}
+
+
+def test_bulk_message_delete_is_atomic_and_sender_only():
+    db.init_db()
+    alice = db.create_user("bulk-alice", "Alice", "x")
+    bob = db.create_user("bulk-bob", "Bob", "x")
+    cid = db.create_conversation("direct", None, alice, [bob])
+    db.save_message("bulk-own", cid, alice, "Mine", "node-1", "2026-11-02T10:00:00Z")
+    db.save_message("bulk-other", cid, bob, "Theirs", "node-1", "2026-11-02T10:01:00Z")
+
+    assert db.delete_messages(["bulk-own", "bulk-other"], alice) is None
+    assert [message["id"] for message in db.history(cid)] == ["bulk-own", "bulk-other"]
+    assert db.delete_messages(["bulk-own"], alice) == [{"message_id": "bulk-own", "conversation_id": cid}]
+    assert [message["id"] for message in db.history(cid)] == ["bulk-other"]
+    with pytest.raises(Exception):
+        BulkDeleteMessagesIn(message_ids=["same", "same"])
+    with pytest.raises(Exception):
+        BulkDeleteMessagesIn(message_ids=["x"] * 101)
+
+
 def test_schema_validation():
     with pytest.raises(Exception):
         SendIn(type="message.send", request_id="1", conversation_id="x", text="")
     e = EventEnvelope(event_id="1", event_type="chat.message.created", origin_node="node-1", message_id="m",
                       conversation_id="c", sender_id="s", sender_name="S", recipient_ids=["a"], created_at="t", payload={})
     assert e.schema_version == 1
+
+
+def test_stories_expire_track_views_and_enforce_author_delete():
+    from app.schemas import StoryIn
+
+    db.init_db()
+    owner = db.create_user("story-owner", "Story Owner", "x")
+    viewer = db.create_user("story-viewer", "Story Viewer", "x")
+    stranger = db.create_user("story-stranger", "Story Stranger", "x")
+    db.follow_user(viewer, owner)
+    image = b"\x89PNG\r\n\x1a\nstory-image"
+    story_id = db.create_story(owner, "Hello stories", image, "image/png")
+
+    stories = db.list_stories(viewer)
+    owner_stories = next(group for group in stories if group["user_id"] == owner)
+    assert owner_stories["text"] == "Hello stories"
+    assert owner_stories["viewed"] == 0
+    assert db.get_story_image(story_id, viewer) == (image, "image/png")
+    assert db.mark_story_viewed(story_id, owner) is False
+    assert db.mark_story_viewed(story_id, viewer) is True
+    assert db.mark_story_viewed(story_id, viewer) is True
+    assert next(item for item in db.list_stories(viewer) if item["id"] == story_id)["viewed"] == 1
+    reaction = db.toggle_story_reaction(story_id, viewer, "❤️")
+    assert reaction == {"reaction": "❤️", "count": 1}
+    assert next(item for item in db.list_stories(viewer) if item["id"] == story_id)["my_reaction"] == "❤️"
+    assert db.list_story_reactions(story_id, owner)[0]["id"] == viewer
+    assert db.toggle_story_reaction(story_id, viewer, "❤️") == {"reaction": None, "count": 0}
+    assert db.toggle_story_reaction(story_id, stranger, "🔥") is None
+    viewers = db.story_viewers(story_id, owner)
+    assert len(viewers) == 1 and viewers[0]["id"] == viewer
+    assert db.story_viewers(story_id, stranger) is None
+    assert db.delete_story(story_id, stranger) is False
+
+    with db.conn() as connection:
+        connection.execute("UPDATE stories SET created_at=? WHERE id=?", (time.time() - 86401, story_id))
+    assert db.get_story_image(story_id, viewer) is None
+    assert all(item["id"] != story_id for item in db.list_stories(viewer))
+    assert db.delete_story(story_id, owner) is False
+
+    with pytest.raises(Exception):
+        StoryIn()
+    assert StoryIn(text="Text story").text == "Text story"
+
+
+def test_follow_relationships_and_search_status():
+    db.init_db()
+    alice = db.create_user("follow-alice", "Alice", "x")
+    bob = db.create_user("follow-bob", "Bob", "x")
+    carol = db.create_user("follow-carol", "Carol", "x")
+
+    assert db.follow_user(alice, alice) is False
+    assert db.follow_user(alice, bob) is True
+    assert db.follow_user(alice, bob) is True
+    assert db.follow_user(carol, bob) is True
+    assert db.follow_counts(alice) == {"followers": 0, "following": 1}
+    assert db.follow_counts(bob) == {"followers": 2, "following": 0}
+    assert [member["id"] for member in db.follow_list(bob, "followers")] == [carol, alice]
+    search_result = next(user for user in db.search_users("Bob", alice) if user["id"] == bob)
+    assert search_result["is_following"] == 1
+    assert search_result["follower_count"] == 2
+    db.update_profile(bob, "Bob", "", "follow-bob@example.com", None)
+    contact_match = db.match_contacts(["follow-bob@example.com"], [], alice)[0]
+    assert contact_match["id"] == bob and contact_match["is_following"] == 1
+    assert db.unfollow_user(alice, bob) is True
+    assert db.unfollow_user(alice, bob) is False
+    assert db.follow_counts(bob)["followers"] == 1
+
+
+def test_follow_endpoints_return_user_friendly_relationship_data():
+    from fastapi.testclient import TestClient
+    from app import main
+
+    db.init_db()
+    alice = db.create_user("follow-route-alice", "Route Alice", "x")
+    bob = db.create_user("follow-route-bob", "Route Bob", "x")
+    client = TestClient(main.app)
+    headers = {"Authorization": f"Bearer {make_token(alice)}"}
+
+    response = client.post(f"/api/users/{bob}/follow", headers=headers)
+    assert response.status_code == 200 and response.json()["is_following"] is True
+    results = client.get("/api/users?q=Route%20Bob", headers=headers).json()
+    assert next(item for item in results if item["id"] == bob)["is_following"] is True
+    assert client.get("/api/me/follows", headers=headers).json() == {"followers": 0, "following": 1}
+    assert client.get(f"/api/users/{bob}/followers", headers=headers).json()[0]["id"] == alice
+    assert client.post(f"/api/users/{alice}/follow", headers=headers).status_code == 400
+    assert client.delete(f"/api/users/{bob}/follow", headers=headers).json()["is_following"] is False
 
 
 def test_typing_frame_validation_and_serialization():
@@ -227,7 +355,6 @@ def test_group_description_and_avatar_are_returned_for_members():
     conversation = next(item for item in db.list_conversations(bob) if item["id"] == cid)
     assert conversation["description"] == "Planning and updates"
     assert conversation["avatar_url"] is None
-
     db.set_conversation_avatar(cid, b"\x89PNG\r\n\x1a\ngroup-image", "image/png")
     conversation = next(item for item in db.list_conversations(bob) if item["id"] == cid)
     assert conversation["avatar_url"].startswith(f"/api/conversations/{cid}/avatar?v=")
@@ -239,6 +366,83 @@ def test_group_description_and_avatar_are_returned_for_members():
     assert db.remove_conversation_avatar(cid)
     conversation = next(item for item in db.list_conversations(bob) if item["id"] == cid)
     assert conversation["avatar_url"] is None
+
+
+def test_group_admin_controls_and_invitations_are_available_to_creator():
+    from fastapi import HTTPException
+    from app import main
+    from app.schemas import ConversationUpdateIn, GroupInviteIn
+
+    db.init_db()
+    owner = db.create_user("group-action-owner", "Group Owner", "x")
+    member = db.create_user("group-action-member", "Group Member", "x")
+    invitee = db.create_user("group-action-invitee", "Group Invitee", "x")
+    cid = db.create_conversation("group", "Action group", owner, [member])
+
+    owner_conversation = next(item for item in db.list_conversations(owner) if item["id"] == cid)
+    assert owner_conversation["is_admin"] is True
+    assert main.update_conversation(cid, ConversationUpdateIn(title="Renamed", description="Updated"), owner)["title"] == "Renamed"
+    invite = main.invite_to_group(cid, GroupInviteIn(user_id=invitee), owner)
+    assert invite["status"] == "pending"
+    assert main.accept_group_invite(invite["invite_id"], invitee)["id"] == cid
+    assert main.set_group_admin(cid, member, True, owner)["is_admin"] is True
+    member_record = next(member_item for member_item in next(
+        item for item in db.list_conversations(member) if item["id"] == cid
+    )["members"] if member_item["id"] == member)
+    assert member_record["is_admin"] == 1
+    assert main.remove_group_member(cid, member, owner)["removed"] is True
+    with pytest.raises(HTTPException) as exc:
+        main.update_conversation(cid, ConversationUpdateIn(title="Nope", description=""), member)
+    assert exc.value.status_code == 403
+
+
+def test_story_audience_respects_followers_and_direct_message_history():
+    db.init_db()
+    owner = db.create_user("audience-owner", "Owner", "x")
+    follower = db.create_user("audience-follower", "Follower", "x")
+    message_contact = db.create_user("audience-message", "Message contact", "x")
+    outsider = db.create_user("audience-outsider", "Outsider", "x")
+    db.follow_user(follower, owner)
+    db.follow_user(message_contact, owner)
+    cid = db.create_conversation("direct", None, owner, [message_contact])
+    db.save_message("audience-message-history", cid, owner, "Earlier message", "node-1", "2026-11-02T10:00:00Z")
+    follower_story = db.create_story(owner, "Followers only", audience="followers")
+    message_story = db.create_story(owner, "Message contacts only", audience="messages")
+    both_story = db.create_story(owner, "Both groups", audience="both")
+    all_story = db.create_story(owner, "Everyone", audience="all")
+
+    follower_visible = {item["id"] for item in db.list_stories(follower)}
+    message_visible = {item["id"] for item in db.list_stories(message_contact)}
+    outsider_visible = {item["id"] for item in db.list_stories(outsider)}
+    assert {follower_story, both_story, all_story} <= follower_visible
+    assert message_story not in follower_visible
+    assert {follower_story, message_story, both_story, all_story} <= message_visible
+    assert not {follower_story, message_story, both_story, all_story} & outsider_visible
+    assert db.get_story_image(follower_story, outsider) is None
+
+
+def test_verification_application_requires_admin_review_and_exposes_badge():
+    from fastapi import HTTPException
+    from app import main
+    from app.schemas import VerificationApplicationIn, VerificationReviewIn
+
+    db.init_db()
+    user = db.create_user("verification-user", "Verification User", "x")
+    admin = db.create_user("verification-admin", "Verification Admin", "x", is_admin=True)
+    application = VerificationApplicationIn(reason="I represent a public organization and need an authentic account.")
+    assert main.apply_for_verification(application, user)["status"] == "pending"
+    assert main.admin_verification_applications(admin)[0]["user_id"] == user
+    assert main.review_verification_application(user, VerificationReviewIn(approved=True), admin)["is_verified"] is True
+    assert db.public_profile(user, admin)["is_verified"] == 1
+    assert main.my_verification(user)["is_verified"] is True
+    assert main.public_user(db.get_user(user))["is_verified"] is True
+    with pytest.raises(HTTPException) as exc:
+        main.review_verification_application(user, VerificationReviewIn(approved=False), admin)
+    assert exc.value.status_code == 404
+    with pytest.raises(Exception):
+        VerificationApplicationIn(reason="short")
+    with pytest.raises(Exception):
+        VerificationApplicationIn(reason=" " * 25)
 
 
 def test_group_unread_counts_include_messages_before_latest_own_message():

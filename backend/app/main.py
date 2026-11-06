@@ -1,4 +1,4 @@
-import asyncio, json, logging, sqlite3, time
+import asyncio, base64, binascii, json, logging, sqlite3, time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -9,7 +9,7 @@ from . import db
 from .auth import RateLimiter, check_pw, current_user_id, decode_token, hash_pw, make_token
 from .config import settings
 from .hub import hub
-from .schemas import (ContactMatchIn, ConversationIn, ConversationUpdateIn, DeleteEnvelope, EditEnvelope, EditMessageIn, EventEnvelope, LoginIn, ProfileIn, ReceiptEnvelope, RegisterIn, SendIn, TypingIn, TypingEnvelope)
+from .schemas import (BulkDeleteMessagesIn, ContactMatchIn, ConversationIn, ConversationUpdateIn, DeleteEnvelope, EditEnvelope, EditMessageIn, EventEnvelope, GroupInviteIn, LoginIn, ProfileIn, ReceiptEnvelope, RegisterIn, SendIn, StoryIn, StoryReactionIn, TypingIn, TypingEnvelope, VerificationApplicationIn, VerificationReviewIn)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [" + settings.SERVER_ID + "] %(name)s: %(message)s")
 log = logging.getLogger("vakochat")
@@ -56,6 +56,7 @@ def public_user(u):
         phone = f"+{phone}"
     return {"id": u["id"], "username": u["username"], "display_name": u["display_name"], "bio": u["bio"],
             "is_admin": bool(u["is_admin"]) or u["username"].lower() in admin_usernames(),
+            "is_verified": bool(u["is_verified"]),
             "email": u["email"], "phone": phone,
             "avatar_url": f"/api/users/{u['id']}/avatar?v={u['avatar_version'] or ''}" if db.has_avatar(u["id"]) else None}
 
@@ -84,8 +85,22 @@ def admin_users(q: str = "", _: str = Depends(require_admin)):
     users = db.list_admin_users(q[:64])
     for user in users:
         user["is_admin"] = bool(user["is_admin"]) or user["username"].lower() in configured_admins
+        user["is_verified"] = bool(user["is_verified"])
         user["managed_by_config"] = user["username"].lower() in configured_admins
     return users
+
+
+@app.get("/api/admin/verification-applications")
+def admin_verification_applications(_: str = Depends(require_admin)):
+    return db.list_verification_applications()
+
+
+@app.put("/api/admin/verification-applications/{user_id}")
+def review_verification_application(user_id: str, body: VerificationReviewIn, uid: str = Depends(require_admin)):
+    if not db.review_verification_application(user_id, uid, body.approved):
+        raise HTTPException(404, "Pending verification application not found")
+    db.record_audit(uid, "verification.approved" if body.approved else "verification.denied", user_id)
+    return {"user_id": user_id, "is_verified": body.approved, "status": "approved" if body.approved else "denied"}
 
 
 @app.put("/api/admin/users/{user_id}/admin")
@@ -256,6 +271,101 @@ def delete_avatar(uid: str = Depends(current_user_id)):
     return public_user(db.get_user(uid))
 
 
+@app.get("/api/stories")
+def stories(uid: str = Depends(current_user_id)):
+    grouped = {}
+    for story in db.list_stories(uid):
+        author_id = story["user_id"]
+        author = grouped.setdefault(author_id, {
+            "user": {
+                "id": author_id,
+                "display_name": story["display_name"],
+                "username": story["username"],
+                "avatar_url": story["avatar_url"],
+                "is_verified": bool(story["is_verified"]),
+            },
+            "stories": [],
+            "has_unviewed": False,
+        })
+        item = {
+            "id": story["id"],
+            "text": story["text"],
+            "created_at": story["created_at"],
+            "has_image": story["image_content_type"] is not None,
+            "viewed": bool(story["viewed"]),
+            "view_count": story["view_count"],
+            "reaction_count": story["reaction_count"],
+            "my_reaction": story["my_reaction"],
+        }
+        author["stories"].append(item)
+        if author_id != uid and not item["viewed"]:
+            author["has_unviewed"] = True
+    return list(grouped.values())
+
+
+@app.post("/api/stories")
+def create_story(body: StoryIn, uid: str = Depends(current_user_id)):
+    image_data = None
+    content_type = body.image_content_type
+    if body.image_data:
+        try:
+            image_data = base64.b64decode(body.image_data, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise HTTPException(422, "Story image data is invalid") from error
+        if len(image_data) > MAX_AVATAR_BYTES:
+            raise HTTPException(413, "Story images must be 2 MB or smaller")
+        detected_type = image_content_type(image_data)
+        if not image_data or detected_type != content_type:
+            raise HTTPException(415, "Story image must be a valid PNG, JPEG, or WebP")
+    story_id = db.create_story(uid, body.text.strip(), image_data, content_type, body.audience)
+    return {"story_id": story_id}
+
+
+@app.get("/api/stories/{story_id}/image")
+def story_image(story_id: str, uid: str = Depends(current_user_id)):
+    image = db.get_story_image(story_id, uid)
+    if not image:
+        raise HTTPException(404, "Story image not found or expired")
+    data, content_type = image
+    return Response(data, media_type=content_type,
+                    headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.post("/api/stories/{story_id}/view")
+def view_story(story_id: str, uid: str = Depends(current_user_id)):
+    if not db.mark_story_viewed(story_id, uid):
+        raise HTTPException(404, "Story not found")
+    return {"story_id": story_id, "viewed": True}
+
+
+@app.put("/api/stories/{story_id}/reaction")
+def react_to_story(story_id: str, body: StoryReactionIn, uid: str = Depends(current_user_id)):
+    result = db.toggle_story_reaction(story_id, uid, body.reaction)
+    if result is None:
+        raise HTTPException(404, "Story not found or unavailable")
+    return {"story_id": story_id, **result}
+
+
+@app.get("/api/stories/{story_id}/views")
+def story_views(story_id: str, uid: str = Depends(current_user_id)):
+    viewers = db.story_viewers(story_id, uid)
+    if viewers is None:
+        raise HTTPException(404, "Story not found")
+    for viewer in viewers:
+        viewer["is_verified"] = bool(viewer["is_verified"])
+    reactions = db.list_story_reactions(story_id, uid)
+    for reaction in reactions:
+        reaction["is_verified"] = bool(reaction["is_verified"])
+    return {"count": len(viewers), "viewers": viewers, "reactions": reactions}
+
+
+@app.delete("/api/stories/{story_id}")
+def remove_story(story_id: str, uid: str = Depends(current_user_id)):
+    if not db.delete_story(story_id, uid):
+        raise HTTPException(404, "Story not found")
+    return {"story_id": story_id, "deleted": True}
+
+
 @app.get("/api/users/{user_id}/avatar")
 def get_avatar(user_id: str):
     avatar = db.get_avatar(user_id)
@@ -316,15 +426,80 @@ def get_conversation_avatar(cid: str):
 
 @app.get("/api/users")
 def users(q: str = "", uid: str = Depends(current_user_id)):
-    return [dict(r) for r in db.search_users(q[:32]) if r["id"] != uid]
+    results = [dict(r) for r in db.search_users(q[:32], uid) if r["id"] != uid]
+    for result in results:
+        result["is_following"] = bool(result["is_following"])
+    return results
+
+
+@app.get("/api/me/follows")
+def my_follows(uid: str = Depends(current_user_id)):
+    return db.follow_counts(uid)
+
+
+@app.get("/api/me/verification")
+def my_verification(uid: str = Depends(current_user_id)):
+    return db.get_verification_application(uid)
+
+
+@app.post("/api/me/verification")
+def apply_for_verification(body: VerificationApplicationIn, uid: str = Depends(current_user_id)):
+    status = db.submit_verification_application(uid, body.reason.strip())
+    if status == "user_not_found":
+        raise HTTPException(404, "User not found")
+    if status == "verified":
+        raise HTTPException(409, "Your account is already verified")
+    return {"status": status, **(db.get_verification_application(uid) or {})}
+
+
+@app.get("/api/users/{user_id}/followers")
+def user_followers(user_id: str, uid: str = Depends(current_user_id)):
+    if not db.get_user(user_id) or db.is_suspended(user_id):
+        raise HTTPException(404, "User not found")
+    return db.follow_list(user_id, "followers", uid)
+
+
+@app.get("/api/users/{user_id}/following")
+def user_following(user_id: str, uid: str = Depends(current_user_id)):
+    if not db.get_user(user_id) or db.is_suspended(user_id):
+        raise HTTPException(404, "User not found")
+    return db.follow_list(user_id, "following", uid)
+
+
+@app.get("/api/users/{user_id}")
+def user_profile(user_id: str, uid: str = Depends(current_user_id)):
+    profile = db.public_profile(user_id, uid)
+    if not profile:
+        raise HTTPException(404, "User not found")
+    return profile
+
+
+@app.post("/api/users/{user_id}/follow")
+def follow_user(user_id: str, uid: str = Depends(current_user_id)):
+    if not db.get_user(user_id) or db.is_suspended(user_id):
+        raise HTTPException(404, "User not found")
+    if user_id == uid:
+        raise HTTPException(400, "You cannot follow yourself")
+    db.follow_user(uid, user_id)
+    return {"user_id": user_id, "is_following": True, **db.follow_counts(user_id)}
+
+
+@app.delete("/api/users/{user_id}/follow")
+def unfollow_user(user_id: str, uid: str = Depends(current_user_id)):
+    if not db.unfollow_user(uid, user_id):
+        raise HTTPException(404, "You are not following this user")
+    return {"user_id": user_id, "is_following": False, **db.follow_counts(user_id)}
 
 
 @app.post("/api/contacts/match")
 def match_contacts(body: ContactMatchIn, uid: str = Depends(current_user_id)):
     emails = list({email.strip().lower() for email in body.emails if email.strip()})
     phones = list({phone for item in body.phones if (phone := db.normalize_phone(item))})
-    matches = db.match_contacts(emails[:100], phones[:100])
-    return [dict(user) for user in matches if user["id"] != uid]
+    matches = db.match_contacts(emails[:100], phones[:100], uid)
+    results = [dict(user) for user in matches if user["id"] != uid]
+    for result in results:
+        result["is_following"] = bool(result["is_following"])
+    return results
 
 
 @app.get("/api/presence")
@@ -337,6 +512,16 @@ async def presence(uid: str = Depends(current_user_id)):
 @app.get("/api/conversations")
 def conversations(uid: str = Depends(current_user_id)):
     return db.list_conversations(uid)
+
+
+@app.delete("/api/conversations/{cid}")
+def hide_conversation(cid: str, uid: str = Depends(current_user_id)):
+    status = db.hide_conversation(cid, uid)
+    if status == "not_found":
+        raise HTTPException(404, "Conversation not found")
+    if status == "group":
+        raise HTTPException(409, "Leave the group to remove it from your conversations")
+    return {"conversation_id": cid, "hidden": True}
 
 
 @app.post("/api/conversations")
@@ -354,9 +539,82 @@ def new_conversation(body: ConversationIn, uid: str = Depends(current_user_id)):
 
 @app.put("/api/conversations/{cid}")
 def update_conversation(cid: str, body: ConversationUpdateIn, uid: str = Depends(current_user_id)):
-    if not db.is_member(cid, uid) or not db.update_conversation(cid, body.title.strip(), body.description.strip()):
+    if not db.is_group_admin(cid, uid):
+        raise HTTPException(403, "Group administrator access required")
+    if not db.update_conversation(cid, body.title.strip(), body.description.strip()):
         raise HTTPException(404, "Group not found")
     return next(c for c in db.list_conversations(uid) if c["id"] == cid)
+
+
+@app.get("/api/conversations/{cid}/members")
+def group_members(cid: str, uid: str = Depends(current_user_id)):
+    if not db.is_member(cid, uid):
+        raise HTTPException(404, "Group not found")
+    conversation = next((item for item in db.list_conversations(uid) if item["id"] == cid), None)
+    if not conversation or conversation["kind"] != "group":
+        raise HTTPException(404, "Group not found")
+    return conversation["members"]
+
+
+@app.post("/api/conversations/{cid}/invites")
+def invite_to_group(cid: str, body: GroupInviteIn, uid: str = Depends(current_user_id)):
+    if not db.is_group_admin(cid, uid):
+        raise HTTPException(403, "Group administrator access required")
+    invite_id, status = db.create_group_invite(cid, uid, body.user_id)
+    errors = {
+        "group_not_found": (404, "Group not found"),
+        "user_not_found": (404, "User not found"),
+        "already_member": (409, "That user is already a group member"),
+    }
+    if status in errors:
+        code, message = errors[status]
+        raise HTTPException(code, message)
+    return {"invite_id": invite_id, "status": status}
+
+
+@app.get("/api/group-invites")
+def group_invites(uid: str = Depends(current_user_id)):
+    return db.list_group_invites(uid)
+
+
+@app.post("/api/group-invites/{invite_id}/accept")
+def accept_group_invite(invite_id: str, uid: str = Depends(current_user_id)):
+    cid = db.respond_group_invite(invite_id, uid, True)
+    if not cid:
+        raise HTTPException(404, "Pending group invitation not found")
+    return next(c for c in db.list_conversations(uid) if c["id"] == cid)
+
+
+@app.delete("/api/group-invites/{invite_id}")
+def decline_group_invite(invite_id: str, uid: str = Depends(current_user_id)):
+    if not db.respond_group_invite(invite_id, uid, False):
+        raise HTTPException(404, "Pending group invitation not found")
+    return {"invite_id": invite_id, "status": "declined"}
+
+
+@app.put("/api/conversations/{cid}/admins/{member_id}")
+def set_group_admin(cid: str, member_id: str, enabled: bool, uid: str = Depends(current_user_id)):
+    if not db.is_group_admin(cid, uid):
+        raise HTTPException(403, "Group administrator access required")
+    if not db.update_group_admin(cid, member_id, enabled):
+        raise HTTPException(409, "Group administrator role could not be changed")
+    return {"user_id": member_id, "is_admin": enabled}
+
+
+@app.delete("/api/conversations/{cid}/members/{member_id}")
+def remove_group_member(cid: str, member_id: str, uid: str = Depends(current_user_id)):
+    if not db.is_group_admin(cid, uid):
+        raise HTTPException(403, "Group administrator access required")
+    if not db.remove_group_member(cid, member_id):
+        raise HTTPException(409, "Member could not be removed; ensure the group keeps an administrator")
+    return {"user_id": member_id, "removed": True}
+
+
+@app.delete("/api/conversations/{cid}/leave")
+def leave_group(cid: str, uid: str = Depends(current_user_id)):
+    if not db.leave_group(cid, uid):
+        raise HTTPException(409, "You cannot leave this group unless another member remains")
+    return {"conversation_id": cid, "left": True}
 
 
 @app.get("/api/conversations/{cid}/messages")
@@ -544,6 +802,23 @@ async def delete_message(message_id: str, uid: str = Depends(current_user_id)):
     relayed = await hub.publish_delete(env)
     return {"message_id": message_id, "conversation_id": conversation_id,
             "relay_status": "relayed" if relayed else "local_only"}
+
+
+@app.post("/api/messages/bulk-delete")
+async def bulk_delete_messages(body: BulkDeleteMessagesIn, uid: str = Depends(current_user_id)):
+    deleted = db.delete_messages(body.message_ids, uid)
+    if deleted is None:
+        raise HTTPException(404, "One or more messages were not found or are not yours to delete")
+    results = []
+    for item in deleted:
+        members = await asyncio.to_thread(db.member_ids, item["conversation_id"])
+        env = DeleteEnvelope(event_id=db.new_id(), event_type="chat.message.deleted", origin_node=settings.SERVER_ID,
+                             message_id=item["message_id"], conversation_id=item["conversation_id"],
+                             recipient_ids=members)
+        await hub.deliver_local(env.recipient_ids, hub.delete_frame_from(env), count_message_delivery=False)
+        relayed = await hub.publish_delete(env)
+        results.append({**item, "relay_status": "relayed" if relayed else "local_only"})
+    return {"deleted": results}
 
 
 @app.put("/api/messages/{message_id}")
